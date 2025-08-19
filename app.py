@@ -211,7 +211,7 @@ if 'df' in locals() and not df.empty and 'categorical_col' in locals():
         st.markdown("\n".join([f"- {s}" for s in story_lines]))
 
         # -----------------------------
-        # Top 5 categories table + bar
+        # Top 5 categories table + bar (robust)
         # -----------------------------
         st.subheader(f"🏆 Top 5 {categorical_col} by Anomaly Rate")
         top_table = (
@@ -219,12 +219,17 @@ if 'df' in locals() and not df.empty and 'categorical_col' in locals():
             .head(5)
             .reset_index()[[categorical_col, "Anomaly", "Normal", "anomaly_rate"]]
         )
-        top_table["anomaly_rate"] = (top_table["anomaly_rate"] * 100).round(2)
-        st.dataframe(top_table.rename(columns={"anomaly_rate": "Anomaly Rate (%)"}), use_container_width=True)
+        if not top_table.empty:
+            top_table["anomaly_rate"] = (top_table["anomaly_rate"] * 100).round(2)
+            # Rename IN-PLACE so plotting sees the new column name
+            top_table = top_table.rename(columns={"anomaly_rate": "Anomaly Rate (%)"})
+            st.dataframe(top_table, use_container_width=True)
 
-        bar = px.bar(top_table, x=categorical_col, y="Anomaly Rate (%)", text="Anomaly Rate (%)")
-        bar.update_traces(texttemplate="%{text}", textposition="outside")
-        st.plotly_chart(bar, use_container_width=True)
+            bar = px.bar(top_table, x=categorical_col, y="Anomaly Rate (%)", text="Anomaly Rate (%)")
+            bar.update_traces(texttemplate="%{text}", textposition="outside")
+            st.plotly_chart(bar, use_container_width=True)
+        else:
+            st.info("Not enough data to compute top categories.")
 
         # -----------------------------
         # Results Table (fast) + Styled preview with pill badges
