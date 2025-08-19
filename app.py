@@ -186,7 +186,14 @@ if not df.empty and categorical_col and numeric_cols:
         help="IsolationForest isolates global outliers; LOF finds sparse local densities"
     )
 
-    try:
+    # Analysis trigger button
+    if st.button("🔍 Run Anomaly Analysis", type="primary", use_container_width=True):
+        with st.spinner(f"Running {method} analysis..."):
+            st.session_state.run_analysis = True
+    
+    # Only run analysis if button was clicked
+    if st.session_state.get('run_analysis', False):
+        try:
         # Prepare data with proper error handling
         required_cols = [categorical_col] + numeric_cols
         df_analysis = df[required_cols].copy()
@@ -403,9 +410,12 @@ if not df.empty and categorical_col and numeric_cols:
             except Exception as e:
                 st.warning(f"Could not generate PDF download: {e}")
 
-    except Exception as e:
-        st.error(f"Error in anomaly detection: {e}")
-        st.info("Please check your data and try again.")
+        except Exception as e:
+            st.error(f"Error in anomaly detection: {e}")
+            st.info("Please check your data and try again.")
+            st.session_state.run_analysis = False
+    else:
+        st.info("👆 Select your preferred algorithm and click 'Run Anomaly Analysis' to begin the analysis.")
 
 elif all_columns:
     st.info("Please select both a categorical column and at least one numeric column to proceed.")
