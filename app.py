@@ -195,8 +195,8 @@ if not df.empty and categorical_col and numeric_cols:
     if st.session_state.get('run_analysis', False):
         try:
         # Prepare data with proper error handling
-        required_cols = [categorical_col] + numeric_cols
-        df_analysis = df[required_cols].copy()
+            required_cols = [categorical_col] + numeric_cols
+            df_analysis = df[required_cols].copy()
         
         # Convert numeric columns and handle errors
         for col in numeric_cols:
