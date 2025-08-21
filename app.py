@@ -58,8 +58,22 @@ with st.sidebar:
 def convert_csv_to_parquet_cached(file_bytes: bytes, file_hash: str) -> bytes:
     """Convert CSV bytes to Parquet bytes with caching based on file hash."""
     try:
-        # Load CSV from bytes
-        csv_df = pd.read_csv(BytesIO(file_bytes), low_memory=False)
+        # Try different encodings to handle various CSV formats
+        encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
+        csv_df = None
+        
+        for encoding in encodings_to_try:
+            try:
+                csv_df = pd.read_csv(BytesIO(file_bytes), low_memory=False, encoding=encoding)
+                break  # Successfully loaded with this encoding
+            except UnicodeDecodeError:
+                continue  # Try next encoding
+            except Exception as e:
+                # If it's not an encoding error, break and handle below
+                break
+        
+        if csv_df is None:
+            raise ValueError("Could not decode CSV with any supported encoding")
         
         # Convert to Parquet
         parquet_buffer = BytesIO()
@@ -103,13 +117,27 @@ def load_csv_in_chunks_from_bytes(
     try:
         if not file_bytes:
             return pd.DataFrame()
-        f = BytesIO(file_bytes)
+        
+        # Try different encodings for CSV loading
+        encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
         chunks = []
         total_rows = 0
         prog = st.progress(0, text="Loading data in chunks…")
+        
+        # Find working encoding first
+        working_encoding = 'utf-8'
+        for encoding in encodings_to_try:
+            try:
+                test_chunk = pd.read_csv(BytesIO(file_bytes), low_memory=False, nrows=10, encoding=encoding)
+                working_encoding = encoding
+                break
+            except UnicodeDecodeError:
+                continue
+            except Exception:
+                break
 
         for i, chunk in enumerate(
-            pd.read_csv(f, low_memory=False, chunksize=chunksize, usecols=usecols)
+            pd.read_csv(BytesIO(file_bytes), low_memory=False, chunksize=chunksize, usecols=usecols, encoding=working_encoding)
         ):
             if downcast:
                 for col in chunk.select_dtypes(include=["float64", "float32"]).columns:
@@ -262,10 +290,29 @@ else:
                         # Try to read from parquet first
                         peek = pd.read_parquet(BytesIO(ss.parquet_bytes), engine='pyarrow').head(200)
                     except:
-                        # Fallback to CSV if parquet fails
-                        peek = pd.read_csv(BytesIO(uploaded_bytes), nrows=200)
+                        # Fallback to CSV if parquet fails - try different encodings
+                        encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
+                        peek = None
+                        for encoding in encodings_to_try:
+                            try:
+                                peek = pd.read_csv(BytesIO(uploaded_bytes), nrows=200, encoding=encoding)
+                                break
+                            except UnicodeDecodeError:
+                                continue
+                        if peek is None:
+                            raise ValueError("Could not read file with any supported encoding")
                 else:
-                    peek = pd.read_csv(BytesIO(uploaded_bytes), nrows=200)
+                    # Try different encodings for CSV
+                    encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
+                    peek = None
+                    for encoding in encodings_to_try:
+                        try:
+                            peek = pd.read_csv(BytesIO(uploaded_bytes), nrows=200, encoding=encoding)
+                            break
+                        except UnicodeDecodeError:
+                            continue
+                    if peek is None:
+                        raise ValueError("Could not read file with any supported encoding")
                 ss.all_columns = peek.columns.tolist()
                 st.caption(f"Detected columns: {', '.join(ss.all_columns)}")
             except Exception as e:
@@ -293,9 +340,25 @@ if ss.source == "sample" or (ss.source == "upload" and available_columns):
                 try:
                     sdf = pd.read_parquet(BytesIO(ss.parquet_bytes), engine='pyarrow').head(500)
                 except:
-                    sdf = pd.read_csv(BytesIO(ss.uploaded_bytes), nrows=500) if ss.uploaded_bytes else pd.DataFrame()
+                    # Fallback to CSV with encoding detection
+                    encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
+                    sdf = pd.DataFrame()
+                    for encoding in encodings_to_try:
+                        try:
+                            sdf = pd.read_csv(BytesIO(ss.uploaded_bytes), nrows=500, encoding=encoding) if ss.uploaded_bytes else pd.DataFrame()
+                            break
+                        except UnicodeDecodeError:
+                            continue
             else:
-                sdf = pd.read_csv(BytesIO(ss.uploaded_bytes), nrows=500) if ss.uploaded_bytes else pd.DataFrame()
+                # Try different encodings for CSV
+                encodings_to_try = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-16']
+                sdf = pd.DataFrame()
+                for encoding in encodings_to_try:
+                    try:
+                        sdf = pd.read_csv(BytesIO(ss.uploaded_bytes), nrows=500, encoding=encoding) if ss.uploaded_bytes else pd.DataFrame()
+                        break
+                    except UnicodeDecodeError:
+                        continue
             numeric_guess = sdf.select_dtypes(include=np.number).columns.tolist()
         except Exception:
             numeric_guess = []
