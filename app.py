@@ -9,6 +9,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
+import time
 
 # ------------------------ Page Setup ------------------------
 st.set_page_config(page_title="Anomaly Hunter Pro", layout="wide", page_icon="📊")
@@ -53,6 +54,47 @@ with st.sidebar:
         st.rerun()
 
 # ------------------------ Helpers ------------------------
+@st.cache_data(show_spinner=False)
+def convert_csv_to_parquet_cached(file_bytes: bytes, file_hash: str) -> bytes:
+    """Convert CSV bytes to Parquet bytes with caching based on file hash."""
+    try:
+        # Load CSV from bytes
+        csv_df = pd.read_csv(BytesIO(file_bytes), low_memory=False)
+        
+        # Convert to Parquet
+        parquet_buffer = BytesIO()
+        csv_df.to_parquet(parquet_buffer, engine='pyarrow', index=False)
+        parquet_buffer.seek(0)
+        
+        return parquet_buffer.getvalue()
+    except Exception as e:
+        st.error(f"Error converting CSV to Parquet: {e}")
+        return file_bytes  # Fallback to original CSV bytes
+
+@st.cache_data(show_spinner=False)
+def load_parquet_in_chunks_from_bytes(
+    file_bytes: bytes, chunksize: int = 200_000, usecols=None, downcast: bool = True
+) -> pd.DataFrame:
+    """Load Parquet from bytes using chunking; optionally filter columns & downcast numerics."""
+    try:
+        if not file_bytes:
+            return pd.DataFrame()
+        
+        # Load the full parquet file first (it's already optimized)
+        parquet_df = pd.read_parquet(BytesIO(file_bytes), columns=usecols)
+        
+        # Apply downcast if requested
+        if downcast:
+            for col in parquet_df.select_dtypes(include=["float64", "float32"]).columns:
+                parquet_df[col] = pd.to_numeric(parquet_df[col], downcast="float", errors="coerce")
+            for col in parquet_df.select_dtypes(include=["int64", "int32"]).columns:
+                parquet_df[col] = pd.to_numeric(parquet_df[col], downcast="integer", errors="coerce")
+        
+        return parquet_df
+    except Exception as e:
+        st.error(f"Error reading Parquet: {e}")
+        return pd.DataFrame()
+
 @st.cache_data(show_spinner=False)
 def load_csv_in_chunks_from_bytes(
     file_bytes: bytes, chunksize: int = 200_000, usecols=None, downcast: bool = True
@@ -117,10 +159,10 @@ def ensure_loaded_subset(required_cols):
             raise ValueError(f"Columns not found in sample data: {', '.join(missing)}")
         return ss.df[required_cols].copy()
 
-    # For upload, use bytes with chunking (only required cols)
-    if not ss.uploaded_bytes:
-        raise ValueError("No uploaded file available.")
-    df = load_csv_in_chunks_from_bytes(ss.uploaded_bytes, usecols=list(set(required_cols)))
+    # For upload, use parquet bytes with optimized loading
+    if not ss.get("parquet_bytes"):
+        raise ValueError("No processed file available.")
+    df = load_parquet_in_chunks_from_bytes(ss.parquet_bytes, usecols=list(set(required_cols)))
     if df.empty:
         raise ValueError("Loaded dataframe is empty. Check file and column selections.")
     # Final sanity check
@@ -195,9 +237,35 @@ else:
             ss.uploaded_bytes = uploaded_bytes
             ss.data_loaded = False
             ss.analysis_results = None
-            # Peek columns
+            
+            # Show conversion message with animation
+            conversion_placeholder = st.empty()
+            conversion_placeholder.info("🔄 Converting to lighter format for better performance...")
+            
+            # Convert CSV to Parquet with caching
             try:
-                peek = pd.read_csv(BytesIO(uploaded_bytes), nrows=200)
+                ss.parquet_bytes = convert_csv_to_parquet_cached(uploaded_bytes, str(file_hash))
+                time.sleep(0.5)  # Brief pause to show the message
+                conversion_placeholder.success("✅ Conversion completed! Ready for analysis.")
+                time.sleep(1)  # Show success message briefly
+                conversion_placeholder.empty()
+            except Exception as e:
+                conversion_placeholder.error(f"❌ Conversion failed: {e}. Using original CSV.")
+                ss.parquet_bytes = uploaded_bytes  # Fallback to original
+                time.sleep(2)
+                conversion_placeholder.empty()
+            
+            # Peek columns from the converted parquet or original CSV
+            try:
+                if ss.get("parquet_bytes"):
+                    try:
+                        # Try to read from parquet first
+                        peek = pd.read_parquet(BytesIO(ss.parquet_bytes), engine='pyarrow').head(200)
+                    except:
+                        # Fallback to CSV if parquet fails
+                        peek = pd.read_csv(BytesIO(uploaded_bytes), nrows=200)
+                else:
+                    peek = pd.read_csv(BytesIO(uploaded_bytes), nrows=200)
                 ss.all_columns = peek.columns.tolist()
                 st.caption(f"Detected columns: {', '.join(ss.all_columns)}")
             except Exception as e:
@@ -220,8 +288,14 @@ if ss.source == "sample" or (ss.source == "upload" and available_columns):
         numeric_guess = ss.df.select_dtypes(include=np.number).columns.tolist()
     else:
         try:
-            # Use a small sample from uploaded bytes to infer numeric columns
-            sdf = pd.read_csv(BytesIO(ss.uploaded_bytes), nrows=500) if ss.uploaded_bytes else pd.DataFrame()
+            # Use a small sample from parquet or uploaded bytes to infer numeric columns
+            if ss.get("parquet_bytes"):
+                try:
+                    sdf = pd.read_parquet(BytesIO(ss.parquet_bytes), engine='pyarrow').head(500)
+                except:
+                    sdf = pd.read_csv(BytesIO(ss.uploaded_bytes), nrows=500) if ss.uploaded_bytes else pd.DataFrame()
+            else:
+                sdf = pd.read_csv(BytesIO(ss.uploaded_bytes), nrows=500) if ss.uploaded_bytes else pd.DataFrame()
             numeric_guess = sdf.select_dtypes(include=np.number).columns.tolist()
         except Exception:
             numeric_guess = []
