@@ -442,7 +442,7 @@ def detect_anomalies_ml(df, numeric_cols, method='isolation_forest', contaminati
         st.error(f"Error in ML detection: {str(e)}")
         return None
 
-def generate_insights(df, categorical_col, numeric_cols, method):
+def generate_insights(df, categorical_cols, numeric_cols, method):
     """Generate narrative insights from results"""
     try:
         total = len(df)
@@ -453,18 +453,23 @@ def generate_insights(df, categorical_col, numeric_cols, method):
             'total_records': total,
             'anomalies': anomalies,
             'anomaly_rate': pct,
-            'method': method
+            'method': method,
+            'categorical_insights': {}
         }
         
-        # Category-level analysis
-        if categorical_col and categorical_col in df.columns:
-            grp = df.groupby(categorical_col)['anomaly'].agg(['sum', 'count']).reset_index()
-            grp.columns = [categorical_col, 'anomaly_count', 'total_count']
-            grp['anomaly_rate'] = (grp['anomaly_count'] / grp['total_count'] * 100)
-            grp = grp.sort_values('anomaly_rate', ascending=False)
-            
-            insights['top_categories'] = grp.head(10).to_dict('records')
-            insights['category_with_highest_rate'] = grp.iloc[0] if len(grp) > 0 else None
+        # Category-level analysis for each categorical column
+        if categorical_cols:
+            for categorical_col in categorical_cols:
+                if categorical_col in df.columns:
+                    grp = df.groupby(categorical_col)['anomaly'].agg(['sum', 'count']).reset_index()
+                    grp.columns = [categorical_col, 'anomaly_count', 'total_count']
+                    grp['anomaly_rate'] = (grp['anomaly_count'] / grp['total_count'] * 100)
+                    grp = grp.sort_values('anomaly_rate', ascending=False)
+                    
+                    insights['categorical_insights'][categorical_col] = {
+                        'top_categories': grp.head(10).to_dict('records'),
+                        'highest_rate': grp.iloc[0].to_dict() if len(grp) > 0 else None
+                    }
         
         # Feature importance (which features contribute most to anomalies)
         if len(numeric_cols) > 0:
@@ -494,7 +499,7 @@ def generate_insights(df, categorical_col, numeric_cols, method):
         st.error(f"Error generating insights: {str(e)}")
         return {}
 
-def create_visualizations(df, numeric_cols, categorical_col=None):
+def create_visualizations(df, numeric_cols, categorical_cols=None, date_col=None):
     """Create comprehensive visualizations"""
     figs = {}
     
@@ -528,7 +533,51 @@ def create_visualizations(df, numeric_cols, categorical_col=None):
             fig_hist.update_layout(template="plotly_dark", height=400)
             figs['histogram'] = fig_hist
         
-        # 3. Scatter Plot (if 2+ numeric columns)
+        # 3. Time Series Chart (if date column exists)
+        if date_col and date_col in df.columns:
+            try:
+                # Convert to datetime if not already
+                if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+                    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+                
+                # Group by date
+                df_sorted = df.sort_values(date_col)
+                daily_stats = df_sorted.groupby(pd.Grouper(key=date_col, freq='D')).agg({
+                    'anomaly': ['sum', 'count']
+                }).reset_index()
+                daily_stats.columns = [date_col, 'anomalies', 'total']
+                daily_stats['anomaly_rate'] = (daily_stats['anomalies'] / daily_stats['total'] * 100).fillna(0)
+                
+                fig_time = make_subplots(specs=[[{"secondary_y": True}]])
+                
+                fig_time.add_trace(
+                    go.Scatter(x=daily_stats[date_col], y=daily_stats['anomalies'],
+                              name="Anomaly Count", line=dict(color='#FF6B6B', width=2),
+                              fill='tozeroy'),
+                    secondary_y=False,
+                )
+                
+                fig_time.add_trace(
+                    go.Scatter(x=daily_stats[date_col], y=daily_stats['anomaly_rate'],
+                              name="Anomaly Rate (%)", line=dict(color='#FFE66D', width=2, dash='dash')),
+                    secondary_y=True,
+                )
+                
+                fig_time.update_layout(
+                    title="Anomalies Over Time",
+                    template="plotly_dark",
+                    height=400,
+                    hovermode='x unified'
+                )
+                fig_time.update_xaxes(title_text="Date")
+                fig_time.update_yaxes(title_text="Anomaly Count", secondary_y=False)
+                fig_time.update_yaxes(title_text="Anomaly Rate (%)", secondary_y=True)
+                
+                figs['timeseries'] = fig_time
+            except Exception as e:
+                st.warning(f"Could not create time series chart: {str(e)}")
+        
+        # 4. Scatter Plot (if 2+ numeric columns)
         if len(numeric_cols) >= 2:
             fig_scatter = px.scatter(
                 df.sample(min(10000, len(df))),  # Sample for performance
@@ -543,26 +592,28 @@ def create_visualizations(df, numeric_cols, categorical_col=None):
             fig_scatter.update_layout(template="plotly_dark", height=500)
             figs['scatter'] = fig_scatter
         
-        # 4. Category Analysis (if categorical column exists)
-        if categorical_col and categorical_col in df.columns:
-            grp = df.groupby(categorical_col)['anomaly'].agg(['sum', 'count']).reset_index()
-            grp.columns = [categorical_col, 'anomaly_count', 'total_count']
-            grp['anomaly_rate'] = (grp['anomaly_count'] / grp['total_count'] * 100)
-            grp = grp.sort_values('anomaly_rate', ascending=False).head(15)
-            
-            fig_bar = px.bar(
-                grp,
-                x=categorical_col,
-                y='anomaly_rate',
-                title=f"Top 15 {categorical_col} by Anomaly Rate",
-                labels={'anomaly_rate': 'Anomaly Rate (%)'},
-                color='anomaly_rate',
-                color_continuous_scale='Reds'
-            )
-            fig_bar.update_layout(template="plotly_dark", height=400)
-            figs['category_bar'] = fig_bar
+        # 5. Category Analysis (for each categorical column)
+        if categorical_cols:
+            for i, categorical_col in enumerate(categorical_cols[:3]):  # Limit to first 3
+                if categorical_col in df.columns:
+                    grp = df.groupby(categorical_col)['anomaly'].agg(['sum', 'count']).reset_index()
+                    grp.columns = [categorical_col, 'anomaly_count', 'total_count']
+                    grp['anomaly_rate'] = (grp['anomaly_count'] / grp['total_count'] * 100)
+                    grp = grp.sort_values('anomaly_rate', ascending=False).head(15)
+                    
+                    fig_bar = px.bar(
+                        grp,
+                        x=categorical_col,
+                        y='anomaly_rate',
+                        title=f"Top 15 {categorical_col} by Anomaly Rate",
+                        labels={'anomaly_rate': 'Anomaly Rate (%)'},
+                        color='anomaly_rate',
+                        color_continuous_scale='Reds'
+                    )
+                    fig_bar.update_layout(template="plotly_dark", height=400)
+                    figs[f'category_bar_{i}'] = fig_bar
         
-        # 5. Parallel Coordinates (for multivariate view)
+        # 6. Parallel Coordinates (for multivariate view)
         if len(numeric_cols) >= 3:
             sample_df = df.sample(min(1000, len(df)))
             
@@ -592,7 +643,7 @@ def create_visualizations(df, numeric_cols, categorical_col=None):
             )
             figs['parallel'] = fig_parallel
         
-        # 6. Box plots for each numeric column
+        # 7. Box plots for each numeric column
         if len(numeric_cols) > 0:
             fig_box = make_subplots(
                 rows=1, cols=min(3, len(numeric_cols)),
@@ -622,7 +673,7 @@ def create_visualizations(df, numeric_cols, categorical_col=None):
         st.error(f"Error creating visualizations: {str(e)}")
         return figs
 
-def generate_pdf_report(insights, categorical_col, numeric_cols):
+def generate_pdf_report(insights, categorical_cols, numeric_cols):
     """Generate comprehensive PDF report"""
     try:
         buffer = BytesIO()
@@ -662,33 +713,35 @@ def generate_pdf_report(insights, categorical_col, numeric_cols):
         elements.append(Paragraph(f"<b>Analysis Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
         elements.append(Spacer(1, 20))
         
-        # Top Categories Analysis
-        if 'top_categories' in insights and insights['top_categories']:
-            elements.append(Paragraph("Top Categories by Anomaly Rate", heading_style))
-            
-            table_data = [[categorical_col or 'Category', 'Anomaly Count', 'Total Count', 'Anomaly Rate (%)']]
-            for cat in insights['top_categories'][:10]:
-                table_data.append([
-                    str(cat.get(categorical_col, 'N/A')),
-                    str(cat.get('anomaly_count', 0)),
-                    str(cat.get('total_count', 0)),
-                    f"{cat.get('anomaly_rate', 0):.2f}"
-                ])
-            
-            t = Table(table_data, colWidths=[2.5*inch, 1.5*inch, 1.5*inch, 1.5*inch])
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#667eea')),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 12),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-                ('GRID', (0, 0), (-1, -1), 1, colors.grey),
-                ('FONTSIZE', (0, 1), (-1, -1), 10),
-            ]))
-            elements.append(t)
-            elements.append(Spacer(1, 20))
+        # Top Categories Analysis for each categorical column
+        if 'categorical_insights' in insights and insights['categorical_insights']:
+            for cat_col, cat_data in insights['categorical_insights'].items():
+                if cat_data['top_categories']:
+                    elements.append(Paragraph(f"Top Categories by Anomaly Rate - {cat_col}", heading_style))
+                    
+                    table_data = [[cat_col, 'Anomaly Count', 'Total Count', 'Anomaly Rate (%)']]
+                    for cat in cat_data['top_categories'][:10]:
+                        table_data.append([
+                            str(cat.get(cat_col, 'N/A'))[:30],  # Truncate long names
+                            str(cat.get('anomaly_count', 0)),
+                            str(cat.get('total_count', 0)),
+                            f"{cat.get('anomaly_rate', 0):.2f}"
+                        ])
+                    
+                    t = Table(table_data, colWidths=[2.5*inch, 1.5*inch, 1.5*inch, 1.5*inch])
+                    t.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#667eea')),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 12),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+                        ('FONTSIZE', (0, 1), (-1, -1), 10),
+                    ]))
+                    elements.append(t)
+                    elements.append(Spacer(1, 20))
         
         # Feature Importance
         if 'feature_importance' in insights and insights['feature_importance']:
@@ -959,19 +1012,18 @@ with tab2:
         con = initialize_duckdb()
         
         # Column selection
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.markdown("#### 📋 Select Categorical Column (Optional)")
+            st.markdown("#### 📋 Select Categorical Columns")
             categorical_cols = [col for col, info in st.session_state.column_info.items() 
                               if 'VARCHAR' in info['type'].upper() or 'STRING' in info['type'].upper()]
             
-            categorical_col = st.selectbox(
-                "Choose a categorical column for grouping",
-                ['None'] + categorical_cols,
-                help="Used for category-level analysis"
+            selected_categorical_cols = st.multiselect(
+                "Choose categorical columns for grouping",
+                categorical_cols,
+                help="Used for category-level analysis (can select multiple)"
             )
-            categorical_col = None if categorical_col == 'None' else categorical_col
         
         with col2:
             st.markdown("#### 🔢 Select Numeric Columns")
@@ -984,8 +1036,21 @@ with tab2:
                 "Choose numeric columns for anomaly detection",
                 numeric_cols_available,
                 default=numeric_cols_available[:3] if len(numeric_cols_available) >= 3 else numeric_cols_available,
-                help="Features used for anomaly detection"
+                help="Features used for anomaly detection (select multiple)"
             )
+        
+        with col3:
+            st.markdown("#### 📅 Select Date Column (Optional)")
+            # Detect date/timestamp columns
+            date_cols = [col for col, info in st.session_state.column_info.items() 
+                        if 'DATE' in info['type'].upper() or 'TIMESTAMP' in info['type'].upper()]
+            
+            date_col = st.selectbox(
+                "Choose date column for time-based analysis",
+                ['None'] + date_cols,
+                help="View anomalies over time"
+            )
+            date_col = None if date_col == 'None' else date_col
         
         st.markdown("---")
         
@@ -1085,7 +1150,8 @@ with tab2:
                             st.session_state.results_df = results_df
                             st.session_state.analysis_complete = True
                             st.session_state.selected_numeric_cols = numeric_cols
-                            st.session_state.selected_categorical_col = categorical_col
+                            st.session_state.selected_categorical_cols = selected_categorical_cols
+                            st.session_state.selected_date_col = date_col
                             st.session_state.selected_method = method
                             
                             elapsed_time = time.time() - start_time
@@ -1107,6 +1173,8 @@ with tab2:
                     
                     except Exception as e:
                         st.error(f"❌ Error during analysis: {str(e)}")
+                        import traceback
+                        st.error(traceback.format_exc())
 
 # =============================================================================
 # TAB 3: RESULTS
@@ -1123,13 +1191,14 @@ with tab3:
     else:
         df_results = st.session_state.results_df
         numeric_cols = st.session_state.selected_numeric_cols
-        categorical_col = st.session_state.selected_categorical_col
+        categorical_cols = st.session_state.selected_categorical_cols
+        date_col = st.session_state.selected_date_col
         method = st.session_state.selected_method
         
         st.markdown("### 📊 Analysis Results")
         
         # Generate insights
-        insights = generate_insights(df_results, categorical_col, numeric_cols, method)
+        insights = generate_insights(df_results, categorical_cols, numeric_cols, method)
         
         # Top metrics
         col1, col2, col3, col4 = st.columns(4)
@@ -1171,7 +1240,7 @@ with tab3:
         # Visualizations
         st.markdown("### 📈 Visualizations")
         
-        figs = create_visualizations(df_results, numeric_cols, categorical_col)
+        figs = create_visualizations(df_results, numeric_cols, categorical_cols, date_col)
         
         # Display charts in grid
         col1, col2 = st.columns(2)
@@ -1184,11 +1253,17 @@ with tab3:
             if 'histogram' in figs:
                 st.plotly_chart(figs['histogram'], use_container_width=True)
         
+        # Time series chart (full width if exists)
+        if 'timeseries' in figs:
+            st.plotly_chart(figs['timeseries'], use_container_width=True)
+        
         if 'scatter' in figs:
             st.plotly_chart(figs['scatter'], use_container_width=True)
         
-        if 'category_bar' in figs:
-            st.plotly_chart(figs['category_bar'], use_container_width=True)
+        # Category bar charts for each categorical column
+        for key in figs.keys():
+            if key.startswith('category_bar_'):
+                st.plotly_chart(figs[key], use_container_width=True)
         
         if 'parallel' in figs:
             with st.expander("🌐 Parallel Coordinates View", expanded=False):
@@ -1213,11 +1288,11 @@ with tab3:
             - Features analyzed: **{', '.join(numeric_cols)}**
             """)
             
-            if categorical_col and 'category_with_highest_rate' in insights and insights['category_with_highest_rate'] is not None:
-                cat_info = insights['category_with_highest_rate']
-                st.markdown(f"""
-                - **Highest anomaly rate**: {cat_info[categorical_col]} at **{cat_info['anomaly_rate']:.2f}%**
-                """)
+            if categorical_cols:
+                st.markdown(f"- Categorical groupings: **{', '.join(categorical_cols)}**")
+            
+            if date_col:
+                st.markdown(f"- Time analysis: **{date_col}**")
         
         with col2:
             if 'feature_importance' in insights and insights['feature_importance']:
@@ -1235,13 +1310,35 @@ with tab3:
                       (Δ = {stats['difference']:.2f})
                     """)
         
+        # Categorical insights for each category
+        if 'categorical_insights' in insights and insights['categorical_insights']:
+            st.markdown("---")
+            st.markdown("### 📋 Categorical Analysis")
+            
+            for cat_col, cat_data in insights['categorical_insights'].items():
+                with st.expander(f"🏆 Top Categories by Anomaly Rate - {cat_col}", expanded=True):
+                    if cat_data['top_categories']:
+                        cat_df = pd.DataFrame(cat_data['top_categories'])
+                        display_cols = [cat_col, 'anomaly_count', 'total_count', 'anomaly_rate']
+                        display_cols = [col for col in display_cols if col in cat_df.columns]
+                        
+                        if display_cols:
+                            cat_df_display = cat_df[display_cols].head(10)
+                            cat_df_display['anomaly_rate'] = cat_df_display['anomaly_rate'].round(2)
+                            st.dataframe(cat_df_display, use_container_width=True)
+                            
+                            if cat_data['highest_rate']:
+                                highest = cat_data['highest_rate']
+                                st.info(f"🥇 Highest anomaly rate: **{highest[cat_col]}** at **{highest['anomaly_rate']:.2f}%**")
+        
         # Top anomalies table
         if 'top_anomalies' in insights and insights['top_anomalies']:
             with st.expander("🔝 Top 5 Anomalies by Score", expanded=False):
                 top_df = pd.DataFrame(insights['top_anomalies'])
-                display_cols = [categorical_col] + numeric_cols + ['anomaly_score'] if categorical_col else numeric_cols + ['anomaly_score']
+                display_cols = (categorical_cols if categorical_cols else []) + numeric_cols + ['anomaly_score']
                 display_cols = [col for col in display_cols if col in top_df.columns]
-                st.dataframe(top_df[display_cols], use_container_width=True)
+                if display_cols:
+                    st.dataframe(top_df[display_cols], use_container_width=True)
         
         # Full results table
         with st.expander("📋 Full Results Table", expanded=False):
@@ -1280,7 +1377,7 @@ with tab3:
         
         with col3:
             # PDF report
-            pdf_buffer = generate_pdf_report(insights, categorical_col, numeric_cols)
+            pdf_buffer = generate_pdf_report(insights, categorical_cols, numeric_cols)
             if pdf_buffer:
                 st.download_button(
                     "📥 Download PDF Report",
