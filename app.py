@@ -960,7 +960,7 @@ with tab1:
             """, unsafe_allow_html=True)
         
         with col3:
-            numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT']
+            numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT', 'NUMBER']
             numeric_count = sum(1 for v in st.session_state.column_info.values() 
                               if any(ntype in v['type'].upper() for ntype in numeric_types))
             st.markdown(f"""
@@ -1028,7 +1028,7 @@ with tab2:
             st.dataframe(debug_df, use_container_width=True)
             
             # Show what will be categorized as numeric
-            numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT']
+            numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT', 'NUMBER']
             numeric_detected = [col for col, info in st.session_state.column_info.items() 
                                if any(ntype in info['type'].upper() for ntype in numeric_types)]
             st.write(f"**Numeric columns detected ({len(numeric_detected)}):** {numeric_detected}")
@@ -1059,8 +1059,8 @@ with tab2:
         
         with col2:
             st.markdown("#### 🔢 Select Numeric Columns")
-            # Check for various numeric types that DuckDB might return
-            numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT']
+            # Check for various numeric types that DuckDB might return - including NUMBER
+            numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT', 'NUMBER']
             numeric_cols_available = [col for col, info in st.session_state.column_info.items() 
                                      if any(ntype in info['type'].upper() for ntype in numeric_types)]
             
