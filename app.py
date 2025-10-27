@@ -426,13 +426,6 @@ def detect_anomalies_ml(df, numeric_cols, method='isolation_forest', contaminati
             model = OneClassSVM(nu=contamination, kernel='rbf', gamma='auto')
             predictions = model.fit_predict(X_scaled)
             scores = model.score_samples(X_scaled)
-            
-        elif method == 'dbscan':
-            model = DBSCAN(eps=0.5, min_samples=5, n_jobs=-1)
-            predictions = model.fit_predict(X_scaled)
-            # For DBSCAN, -1 indicates anomaly
-            predictions = np.where(predictions == -1, -1, 1)
-            scores = np.zeros(len(predictions))  # DBSCAN doesn't provide scores
         
         # Convert predictions to binary (1 = anomaly, 0 = normal)
         df_clean['anomaly'] = (predictions == -1).astype(int)
@@ -823,7 +816,6 @@ with st.sidebar:
         - **Isolation Forest**: Best for global anomalies
         - **LOF**: Local neighborhood outliers
         - **One-Class SVM**: Non-linear boundaries
-        - **DBSCAN**: Density-based clustering
         """)
     
     st.markdown("---")
@@ -1088,7 +1080,7 @@ with tab2:
             with col1:
                 method = st.selectbox(
                     "Algorithm",
-                    ['Isolation Forest', 'Local Outlier Factor', 'One-Class SVM', 'DBSCAN'],
+                    ['Isolation Forest', 'Local Outlier Factor', 'One-Class SVM'],
                     help="ML methods provide more sophisticated detection"
                 )
             
@@ -1100,20 +1092,39 @@ with tab2:
                 )
             
             with col3:
-                if st.session_state.row_count > 100000:
+                # Set max sample size based on algorithm
+                if method in ['Local Outlier Factor', 'One-Class SVM']:
+                    max_sample = min(50000, st.session_state.row_count)
+                    if st.session_state.row_count > 50000:
+                        st.warning(f"⚠️ {method} limited to 50K rows for performance")
+                else:
+                    max_sample = st.session_state.row_count
+                
+                use_sampling = st.checkbox(
+                    "Use Sampling (Recommended for large datasets)",
+                    value=st.session_state.row_count > 50000,
+                    help="Sample data for faster processing. Uncheck to use full dataset."
+                )
+                
+                if use_sampling:
                     sample_size = st.number_input(
-                        "Sample Size (for performance)",
-                        1000, 100000, 50000,
-                        help="ML methods will use a sample for large datasets"
+                        "Sample Size",
+                        1000, max_sample, 
+                        min(50000, max_sample),
+                        help=f"Max {max_sample:,} rows for {method}"
                     )
                 else:
-                    sample_size = st.session_state.row_count
+                    if max_sample < st.session_state.row_count:
+                        sample_size = max_sample
+                        st.info(f"Using maximum allowed: {sample_size:,} rows")
+                    else:
+                        sample_size = st.session_state.row_count
+                        st.info(f"Using full dataset: {sample_size:,} rows")
             
             method_map = {
                 'Isolation Forest': 'isolation_forest',
                 'Local Outlier Factor': 'lof',
-                'One-Class SVM': 'one_class_svm',
-                'DBSCAN': 'dbscan'
+                'One-Class SVM': 'one_class_svm'
             }
             detection_method = method_map[method]
             use_ml = True
@@ -1130,8 +1141,8 @@ with tab2:
                     
                     try:
                         if use_ml:
-                            # Sample data if needed
-                            if st.session_state.row_count > sample_size:
+                            # Use sampling or full dataset based on user choice
+                            if use_sampling and st.session_state.row_count > sample_size:
                                 query = f"""
                                 SELECT * FROM parquet_scan('{st.session_state.parquet_path}')
                                 USING SAMPLE {sample_size} ROWS
@@ -1140,6 +1151,8 @@ with tab2:
                                 st.info(f"ℹ️ Using sample of {sample_size:,} rows for ML analysis")
                             else:
                                 df = get_sample_data(con, st.session_state.parquet_path, st.session_state.row_count)
+                                if not use_sampling:
+                                    st.info(f"ℹ️ Processing full dataset: {len(df):,} rows")
                             
                             results_df = detect_anomalies_ml(df, numeric_cols, detection_method, contamination)
                         else:
