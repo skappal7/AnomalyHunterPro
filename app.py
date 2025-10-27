@@ -197,6 +197,10 @@ if 'initialized' not in st.session_state:
     st.session_state.analysis_complete = False
     st.session_state.results_df = None
     st.session_state.temp_dir = tempfile.mkdtemp()
+    st.session_state.selected_numeric_cols = []
+    st.session_state.selected_categorical_cols = []
+    st.session_state.selected_date_col = None
+    st.session_state.selected_method = None
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -1098,28 +1102,27 @@ with tab2:
                     if st.session_state.row_count > 50000:
                         st.warning(f"⚠️ {method} limited to 50K rows for performance")
                 else:
-                    max_sample = st.session_state.row_count
+                    max_sample = st.session_state.row_count  # No limit for Isolation Forest
                 
                 use_sampling = st.checkbox(
-                    "Use Sampling (Recommended for large datasets)",
-                    value=st.session_state.row_count > 50000,
-                    help="Sample data for faster processing. Uncheck to use full dataset."
+                    "Use Sampling",
+                    value=st.session_state.row_count > 50000 and method != 'Isolation Forest',
+                    help="Sample data for faster processing. Uncheck to use full dataset.",
+                    key=f"sampling_{method}"
                 )
                 
                 if use_sampling:
+                    default_sample = min(50000, max_sample)
                     sample_size = st.number_input(
                         "Sample Size",
                         1000, max_sample, 
-                        min(50000, max_sample),
-                        help=f"Max {max_sample:,} rows for {method}"
+                        default_sample,
+                        help=f"Max {max_sample:,} rows for {method}",
+                        key=f"sample_size_{method}"
                     )
                 else:
-                    if max_sample < st.session_state.row_count:
-                        sample_size = max_sample
-                        st.info(f"Using maximum allowed: {sample_size:,} rows")
-                    else:
-                        sample_size = st.session_state.row_count
-                        st.info(f"Using full dataset: {sample_size:,} rows")
+                    sample_size = max_sample
+                    st.info(f"Using full dataset: {sample_size:,} rows")
             
             method_map = {
                 'Isolation Forest': 'isolation_forest',
