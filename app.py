@@ -225,16 +225,16 @@ def convert_to_parquet(file, file_type):
         
         # Read based on file type
         if file_type == 'csv':
-            df = pd.read_csv(file, low_memory=False)
+            df = pd.read_csv(file, low_memory=False, encoding='utf-8', encoding_errors='replace')
         elif file_type == 'xlsx' or file_type == 'xls':
             df = pd.read_excel(file, engine='openpyxl' if file_type == 'xlsx' else 'xlrd')
         elif file_type == 'txt':
             # Try to detect delimiter
             file.seek(0)
-            sample = file.read(1024).decode('utf-8', errors='ignore')
+            sample = file.read(1024).decode('utf-8', errors='replace')
             file.seek(0)
             delimiter = ',' if ',' in sample else '\t' if '\t' in sample else None
-            df = pd.read_csv(file, delimiter=delimiter, low_memory=False)
+            df = pd.read_csv(file, delimiter=delimiter, low_memory=False, encoding='utf-8', encoding_errors='replace')
         elif file_type == 'parquet':
             df = pd.read_parquet(file)
         else:
