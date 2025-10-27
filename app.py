@@ -311,10 +311,17 @@ def get_column_stats(con, parquet_path):
                 'null_pct': (stats[2] / stats[0] * 100) if stats[0] > 0 else 0
             }
         
+        # DEBUG: Print column types to console
+        print("DEBUG - Column Types Detected:")
+        for col, info in column_info.items():
+            print(f"  {col}: {info['type']}")
+        
         return column_info
         
     except Exception as e:
         st.error(f"Error getting column stats: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return {}
 
 def get_sample_data(con, parquet_path, limit=1000):
@@ -1010,6 +1017,31 @@ with tab2:
         st.markdown("### ⚙️ Configure Analysis")
         
         con = initialize_duckdb()
+        
+        # DEBUG SECTION - Show what we're detecting
+        with st.expander("🔍 DEBUG: Column Detection", expanded=True):
+            st.write("**All Columns and Types:**")
+            debug_df = pd.DataFrame([
+                {'Column': col, 'Type': info['type']}
+                for col, info in st.session_state.column_info.items()
+            ])
+            st.dataframe(debug_df, use_container_width=True)
+            
+            # Show what will be categorized as numeric
+            numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT']
+            numeric_detected = [col for col, info in st.session_state.column_info.items() 
+                               if any(ntype in info['type'].upper() for ntype in numeric_types)]
+            st.write(f"**Numeric columns detected ({len(numeric_detected)}):** {numeric_detected}")
+            
+            # Show what will be categorized as categorical
+            categorical_detected = [col for col, info in st.session_state.column_info.items() 
+                                  if 'VARCHAR' in info['type'].upper() or 'STRING' in info['type'].upper()]
+            st.write(f"**Categorical columns detected ({len(categorical_detected)}):** {categorical_detected}")
+            
+            # Show what will be categorized as date
+            date_detected = [col for col, info in st.session_state.column_info.items() 
+                           if 'DATE' in info['type'].upper() or 'TIMESTAMP' in info['type'].upper()]
+            st.write(f"**Date columns detected ({len(date_detected)}):** {date_detected}")
         
         # Column selection
         col1, col2, col3 = st.columns(3)
