@@ -824,7 +824,7 @@ with st.sidebar:
     
     st.markdown("---")
     
-    if st.button("🔄 Reset Application", use_container_width=True):
+    if st.button("🔄 Reset Application", use_container_width=True, key="reset_app_button"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
@@ -845,11 +845,12 @@ with tab1:
         uploaded_file = st.file_uploader(
             "Choose a file",
             type=['csv', 'xlsx', 'xls', 'txt', 'parquet'],
-            help="Supported formats: CSV, Excel, Text, Parquet"
+            help="Supported formats: CSV, Excel, Text, Parquet",
+            key="file_uploader_main"
         )
     
     with col2:
-        use_sample = st.checkbox("Use Sample Data", help="Load built-in sample dataset")
+        use_sample = st.checkbox("Use Sample Data", help="Load built-in sample dataset", key="use_sample_data")
     
     if use_sample:
         with st.spinner("🎲 Generating sample data..."):
@@ -1058,7 +1059,8 @@ with tab2:
         method_category = st.radio(
             "Choose method category",
             ['Statistical (Fast)', 'Machine Learning (Advanced)'],
-            horizontal=True
+            horizontal=True,
+            key="method_category_select"
         )
         
         col1, col2, col3 = st.columns(3)
@@ -1068,12 +1070,13 @@ with tab2:
                 method = st.selectbox(
                     "Algorithm",
                     ['Z-Score', 'IQR Method'],
-                    help="Statistical methods work on any dataset size"
+                    help="Statistical methods work on any dataset size",
+                    key="stat_method_select"
                 )
             
             with col2:
                 if method == 'Z-Score':
-                    threshold = st.slider("Z-Score Threshold", 2.0, 5.0, 3.0, 0.5)
+                    threshold = st.slider("Z-Score Threshold", 2.0, 5.0, 3.0, 0.5, key="zscore_threshold")
                 else:
                     threshold = None
             
@@ -1085,14 +1088,16 @@ with tab2:
                 method = st.selectbox(
                     "Algorithm",
                     ['Isolation Forest', 'Local Outlier Factor', 'One-Class SVM'],
-                    help="ML methods provide more sophisticated detection"
+                    help="ML methods provide more sophisticated detection",
+                    key="ml_method_select"
                 )
             
             with col2:
                 contamination = st.slider(
                     "Expected Anomaly Rate",
                     0.01, 0.5, 0.1, 0.01,
-                    help="Expected proportion of anomalies (0.1 = 10%)"
+                    help="Expected proportion of anomalies (0.1 = 10%)",
+                    key="contamination_slider"
                 )
             
             with col3:
@@ -1138,7 +1143,7 @@ with tab2:
         if len(numeric_cols) == 0:
             st.warning("⚠️ Please select at least one numeric column")
         else:
-            if st.button("🚀 Run Anomaly Detection", type="primary", use_container_width=True):
+            if st.button("🚀 Run Anomaly Detection", type="primary", use_container_width=True, key="run_analysis_button"):
                 with st.spinner(f"🔍 Running {method} analysis..."):
                     start_time = time.time()
                     
