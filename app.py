@@ -900,8 +900,9 @@ with tab1:
             """, unsafe_allow_html=True)
         
         with col3:
+            numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT']
             numeric_count = sum(1 for v in st.session_state.column_info.values() 
-                              if 'INTEGER' in v['type'] or 'DOUBLE' in v['type'] or 'DECIMAL' in v['type'])
+                              if any(ntype in v['type'].upper() for ntype in numeric_types))
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-label">Numeric Columns</div>
@@ -911,7 +912,7 @@ with tab1:
         
         with col4:
             categorical_count = sum(1 for v in st.session_state.column_info.values() 
-                                  if 'VARCHAR' in v['type'])
+                                  if 'VARCHAR' in v['type'].upper() or 'STRING' in v['type'].upper())
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-label">Categorical Columns</div>
@@ -963,7 +964,7 @@ with tab2:
         with col1:
             st.markdown("#### 📋 Select Categorical Column (Optional)")
             categorical_cols = [col for col, info in st.session_state.column_info.items() 
-                              if 'VARCHAR' in info['type']]
+                              if 'VARCHAR' in info['type'].upper() or 'STRING' in info['type'].upper()]
             
             categorical_col = st.selectbox(
                 "Choose a categorical column for grouping",
@@ -974,8 +975,10 @@ with tab2:
         
         with col2:
             st.markdown("#### 🔢 Select Numeric Columns")
+            # Check for various numeric types that DuckDB might return
+            numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT']
             numeric_cols_available = [col for col, info in st.session_state.column_info.items() 
-                                     if 'INTEGER' in info['type'] or 'DOUBLE' in info['type'] or 'DECIMAL' in info['type']]
+                                     if any(ntype in info['type'].upper() for ntype in numeric_types)]
             
             numeric_cols = st.multiselect(
                 "Choose numeric columns for anomaly detection",
