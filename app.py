@@ -44,7 +44,23 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Minimalist CSS with refined colors
+# Initialize session state IMMEDIATELY after page config
+if 'initialized' not in st.session_state:
+    st.session_state.initialized = True
+    st.session_state.parquet_path = None
+    st.session_state.duckdb_con = None
+    st.session_state.data_loaded = False
+    st.session_state.row_count = 0
+    st.session_state.column_info = {}
+    st.session_state.analysis_complete = False
+    st.session_state.results_df = None
+    st.session_state.temp_dir = tempfile.mkdtemp()
+    st.session_state.selected_numeric_cols = []
+    st.session_state.selected_categorical_cols = []
+    st.session_state.selected_date_col = None
+    st.session_state.selected_method = None
+
+# Minimalist CSS with fixed scaling
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
@@ -53,18 +69,25 @@ st.markdown("""
         font-family: 'Inter', sans-serif;
     }
     
+    /* Force proper scaling */
+    .main .block-container {
+        max-width: 1400px;
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    
     .main-header {
         background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-        padding: 2.5rem;
-        border-radius: 16px;
+        padding: 2rem;
+        border-radius: 12px;
         text-align: center;
         margin-bottom: 2rem;
-        box-shadow: 0 10px 25px rgba(99, 102, 241, 0.3);
+        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
     }
     
     .main-header h1 {
         color: white;
-        font-size: 3rem;
+        font-size: 2.5rem;
         font-weight: 700;
         margin: 0;
         letter-spacing: -0.02em;
@@ -72,28 +95,28 @@ st.markdown("""
     
     .main-header p {
         color: rgba(255, 255, 255, 0.9);
-        font-size: 1.1rem;
-        margin-top: 0.75rem;
+        font-size: 1rem;
+        margin-top: 0.5rem;
         font-weight: 300;
     }
     
     .metric-card {
         background: white;
-        padding: 1.75rem;
-        border-radius: 12px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        padding: 1.5rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
         text-align: center;
         border-left: 4px solid #6366f1;
-        transition: all 0.3s ease;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
     
     .metric-card:hover {
-        transform: translateY(-4px);
-        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.12);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
     }
     
     .metric-value {
-        font-size: 2.5rem;
+        font-size: 2rem;
         font-weight: 700;
         margin: 0.5rem 0;
         color: #1e293b;
@@ -109,10 +132,10 @@ st.markdown("""
     
     .info-box, .success-box {
         background: white;
-        padding: 1.5rem;
-        border-radius: 12px;
+        padding: 1.25rem;
+        border-radius: 10px;
         margin: 1rem 0;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
     }
     
     .info-box {
@@ -127,25 +150,56 @@ st.markdown("""
         background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
         color: white;
         border: none;
-        border-radius: 10px;
-        padding: 0.75rem 2rem;
+        border-radius: 8px;
+        padding: 0.625rem 1.5rem;
         font-weight: 600;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+        transition: all 0.2s ease;
+        box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
         letter-spacing: 0.02em;
+        font-size: 0.875rem;
     }
     
     .stButton>button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 20px rgba(99, 102, 241, 0.4);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
     }
     
+    /* Sidebar fixes */
     [data-testid="stSidebar"] {
         background: linear-gradient(180deg, #1e293b 0%, #334155 100%);
+        padding-top: 2rem;
     }
     
     [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
         color: white;
+        font-size: 0.95rem;
+        line-height: 1.6;
+    }
+    
+    [data-testid="stSidebar"] h2 {
+        color: white;
+        font-size: 1.25rem;
+        margin-bottom: 1rem;
+    }
+    
+    [data-testid="stSidebar"] h3 {
+        color: white;
+        font-size: 1rem;
+        margin-top: 1rem;
+        margin-bottom: 0.5rem;
+    }
+    
+    [data-testid="stSidebar"] .stButton>button {
+        width: 100%;
+        font-size: 0.875rem;
+    }
+    
+    /* Improved expander in sidebar */
+    [data-testid="stSidebar"] .streamlit-expanderHeader {
+        color: white;
+        font-size: 0.9rem;
+        background-color: rgba(255, 255, 255, 0.1);
+        border-radius: 6px;
     }
     
     .stProgress > div > div {
@@ -158,11 +212,12 @@ st.markdown("""
     
     .stTabs [data-baseweb="tab"] {
         background: white;
-        border-radius: 10px;
+        border-radius: 8px;
         color: #64748b;
         font-weight: 600;
-        padding: 12px 24px;
+        padding: 0.75rem 1.5rem;
         border: 2px solid #e2e8f0;
+        font-size: 0.875rem;
     }
     
     .stTabs [aria-selected="true"] {
@@ -171,11 +226,24 @@ st.markdown("""
         border: 2px solid transparent;
     }
     
+    /* Better form labels */
+    .stSelectbox label, .stMultiSelect label, .stSlider label {
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: #1e293b;
+    }
+    
+    /* Radio button horizontal layout */
+    .stRadio > div {
+        flex-direction: row;
+        gap: 1rem;
+    }
+    
     .lottie-container {
         display: flex;
         justify-content: center;
         align-items: center;
-        padding: 2rem;
+        padding: 1.5rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -212,28 +280,7 @@ LOTTIE_URLS = {
     'empty': 'https://lottie.host/6e5f2g0h-4h3i-6e7f-1c2g-g7d0e5f9c2h4/mNo4yX7Fzh.json',
 }
 
-# =============================================================================
-# SESSION STATE INITIALIZATION
-# =============================================================================
 
-DEFAULT_STATE = {
-    'initialized': True,
-    'parquet_path': None,
-    'duckdb_con': None,
-    'data_loaded': False,
-    'row_count': 0,
-    'column_info': {},
-    'analysis_complete': False,
-    'results_df': None,
-    'temp_dir': tempfile.mkdtemp(),
-    'selected_numeric_cols': [],
-    'selected_categorical_cols': [],
-    'selected_date_col': None,
-    'selected_method': None,
-}
-
-if 'initialized' not in st.session_state:
-    st.session_state.update(DEFAULT_STATE)
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -811,10 +858,10 @@ with st.sidebar:
     st.markdown("""
     ### 📚 Quick Guide
     
-    **1.** Upload data (CSV/Excel/Parquet)
-    **2.** Select features for analysis
-    **3.** Choose detection algorithm
-    **4.** Analyze & get insights
+    **1.** Upload data (CSV/Excel/Parquet)  
+    **2.** Select features for analysis  
+    **3.** Choose detection algorithm  
+    **4.** Analyze & get insights  
     **5.** Export results & reports
     """)
     
@@ -822,14 +869,16 @@ with st.sidebar:
     
     with st.expander("🧠 Algorithm Guide"):
         st.markdown("""
-        **Statistical** (Fast)
-        • Z-Score: >3σ outliers
-        • IQR: Interquartile range
+        **Statistical** (Fast, Scalable)
         
-        **ML** (Advanced)
-        • Isolation Forest: Global anomalies
-        • LOF: Local outliers
-        • One-Class SVM: Non-linear
+        • **Z-Score** - Detects outliers >3σ  
+        • **IQR** - Interquartile range method
+        
+        **Machine Learning** (Advanced)
+        
+        • **Isolation Forest** - Global anomalies  
+        • **LOF** - Local neighborhood outliers  
+        • **One-Class SVM** - Non-linear boundaries
         """)
     
     st.markdown("---")
