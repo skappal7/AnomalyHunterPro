@@ -1,4 +1,4 @@
-# 🎯 Anomaly Hunter Pro - Optimized Version
+# 🎯 Anomaly Hunter Pro - Anomaly Detection Tool
 
 ## 📊 Overview
 Enterprise-grade anomaly detection platform with a minimalist design, Lottie animations, and optimized codebase.
