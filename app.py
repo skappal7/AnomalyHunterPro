@@ -1097,7 +1097,7 @@ with tab1:
             })
             
             parquet_path = os.path.join(st.session_state.temp_dir, 'sample_data.parquet')
-            df_sample.to_parquet(parquet_path, compression='snappy')
+            df_sample.to_parquet(parquet_path, compression='snappy', engine="fastparquet")
             
             st.session_state.parquet_path = parquet_path
             st.session_state.data_loaded = True
@@ -1583,7 +1583,7 @@ with tab3:
         
         with col2:
             parquet_buffer = BytesIO()
-            df_results.to_parquet(parquet_buffer, compression='snappy')
+            df_results.to_parquet(parquet_buffer, compression='snappy', engine="fastparquet")
             st.download_button(
                 "📥 Download Parquet",
                 data=parquet_buffer.getvalue(),
