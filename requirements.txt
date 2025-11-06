@@ -1,33 +1,17 @@
-# Core Data Processing
 streamlit==1.39.0
 pandas==2.2.3
 numpy==1.26.4
 
-# Parquet + DB (Python 3.11 Safe Versions)
-pyarrow==15.0.2
+duckdb==0.9.2
 fastparquet==2024.2.0
-duckdb==0.10.2
 
-# File Processing
 openpyxl==3.1.5
 xlrd==2.0.1
-python-magic==0.4.27
 
-# Machine Learning
 scikit-learn==1.5.2
 scipy==1.14.1
 
-# Visualization
 plotly==5.24.1
-matplotlib==3.9.2
-seaborn==0.13.2
-
-# PDF Generation
 reportlab==4.2.5
-
-# Utilities
 python-dateutil==2.9.0
-
-# Animations
-streamlit-lottie==0.0.5
 requests==2.31.0
