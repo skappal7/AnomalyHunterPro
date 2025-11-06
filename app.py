@@ -298,7 +298,7 @@ def detect_file_type(file) -> str | None:
         case _: return None
 
 def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
-    """Convert various file formats to Parquet - simple and reliable"""
+    """Convert various file formats to Parquet using fastparquet"""
     try:
         progress = st.progress(0, text="🔄 Reading file...")
         
@@ -326,8 +326,8 @@ def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
                 
             case 'parquet':
                 progress.progress(30, text="📦 Loading Parquet...")
-                df = pd.read_parquet(file)
-                df.to_parquet(parquet_path, compression='snappy')
+                df = pd.read_parquet(file, engine='fastparquet')
+                df.to_parquet(parquet_path, compression='snappy', engine='fastparquet')
                 progress.progress(100, text="✅ File ready!")
                 time.sleep(0.5)
                 progress.empty()
@@ -338,8 +338,8 @@ def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
         
         progress.progress(70, text="💾 Converting to Parquet...")
         
-        # Save directly - let pandas/pyarrow handle optimization
-        df.to_parquet(parquet_path, compression='snappy', engine='pyarrow')
+        # Use fastparquet instead of pyarrow
+        df.to_parquet(parquet_path, compression='snappy', engine='fastparquet')
         
         progress.progress(100, text="✅ Conversion complete!")
         time.sleep(0.5)
