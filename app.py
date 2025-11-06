@@ -392,7 +392,6 @@ def initialize_duckdb():
         st.session_state.duckdb_con = duckdb.connect(':memory:')
     return st.session_state.duckdb_con
 
-@st.cache_data(ttl=3600)
 def get_column_stats(con, parquet_path: str) -> dict:
     """Get comprehensive column statistics using DuckDB"""
     try:
