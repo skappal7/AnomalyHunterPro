@@ -274,10 +274,10 @@ def display_lottie(lottie_json: dict | None, height: int = 200, key: str = None)
 
 # Lottie animation URLs (free from LottieFiles)
 LOTTIE_URLS = {
-    'upload': 'https://lottie.host/b7c3ec8e-3f5f-4c5c-8a0e-d5b8e3c7a0f1/rVK3wZ5Cxe.json',
-    'processing': 'https://lottie.host/4f3b5c8e-2f1f-4c5c-9a0e-c5b8e3c7a0f2/xYz2wV5Dxf.json',
-    'success': 'https://lottie.host/8a7d1e9f-3g2h-5d6e-0b1f-f6c9d4e8b1g3/pQr3xW6Eyg.json',
-    'empty': 'https://lottie.host/6e5f2g0h-4h3i-6e7f-1c2g-g7d0e5f9c2h4/mNo4yX7Fzh.json',
+    'upload': 'https://lottie.host/0c2c7b1e-4c96-4c3e-9c3d-3c8e5e3c8e5e/N6GqXqGvJR.json',
+    'processing': 'https://lottie.host/647b5f86-0e6a-4fae-af44-84b2f5fc5e5e/OYHYGk4OGU.json',
+    'success': 'https://lottie.host/95a1b0e1-e2e6-4d1e-8c8e-3e3e3e3e3e3e/TjjKdqGqGq.json',
+    'empty': 'https://lottie.host/4e8c5e3c-8e5e-4c3e-9c3d-3c8e5e3c8e5e/ZqGqGqGqGq.json',
 }
 
 
@@ -297,6 +297,7 @@ def detect_file_type(file) -> str | None:
         case '.parquet': return 'parquet'
         case _: return None
 
+@st.cache_data(ttl=3600)
 def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
     """Convert various file formats to Parquet"""
     try:
@@ -361,6 +362,7 @@ def initialize_duckdb():
         st.session_state.duckdb_con = duckdb.connect(':memory:')
     return st.session_state.duckdb_con
 
+@st.cache_data(ttl=3600)
 def get_column_stats(con, parquet_path: str) -> dict:
     """Get comprehensive column statistics using DuckDB"""
     try:
@@ -395,6 +397,35 @@ def get_sample_data(con, parquet_path: str, limit: int = 1000) -> pd.DataFrame:
     """Get sample data for preview"""
     query = f"SELECT * FROM parquet_scan('{parquet_path}') LIMIT {limit}"
     return con.execute(query).df()
+
+def explain_contamination(rate: float, total_records: int) -> str:
+    """Generate user-friendly explanation of contamination rate"""
+    expected_anomalies = int(total_records * rate)
+    
+    if rate <= 0.01:
+        sensitivity = "very strict"
+        use_case = "credit card fraud, critical systems"
+    elif rate <= 0.05:
+        sensitivity = "strict"
+        use_case = "financial transactions, quality control"
+    elif rate <= 0.10:
+        sensitivity = "balanced"
+        use_case = "general business data, customer behavior"
+    elif rate <= 0.20:
+        sensitivity = "lenient"
+        use_case = "exploratory analysis, noisy data"
+    else:
+        sensitivity = "very lenient"
+        use_case = "highly variable data"
+    
+    return f"""
+    **What this means:** You're telling the algorithm to expect ~**{expected_anomalies:,} unusual records** 
+    out of {total_records:,} total ({rate*100:.1f}%).
+    
+    **Sensitivity:** {sensitivity.title()} - typical for {use_case}
+    
+    **💡 Tip:** If you're unsure, start with 0.10 (10%) and adjust based on results.
+    """
 
 # =============================================================================
 # ANOMALY DETECTION ENGINE (FACTORY PATTERN)
@@ -584,6 +615,77 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         st.error(f"Error generating insights: {e}")
         return {}
 
+def generate_narrative(insights: dict, categorical_cols: list, numeric_cols: list, expected_rate: float = None) -> str:
+    """Generate rich narrative summary of results"""
+    total = insights['total_records']
+    anomalies = insights['anomalies']
+    rate = insights['anomaly_rate']
+    method = insights['method']
+    
+    # Executive summary
+    narrative = f"""
+    ### 📊 ANALYSIS SUMMARY
+    
+    Your dataset contains **{total:,} records** analyzed using **{method}**.
+    
+    #### 🎯 THE VERDICT
+    """
+    
+    # Compare to expected rate
+    if expected_rate and anomalies > 0:
+        expected_pct = expected_rate * 100
+        diff = rate - expected_pct
+        
+        if abs(diff) < 1:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - right in line with your expected **{expected_pct:.1f}%** threshold. This suggests the algorithm is well-tuned."
+        elif diff > 2:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - **higher** than your expected **{expected_pct:.1f}%** threshold. This suggests genuine unusual patterns worth investigating."
+        else:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - **lower** than your expected **{expected_pct:.1f}%** threshold. Your data is cleaner than anticipated, or consider lowering the threshold for more sensitivity."
+    else:
+        if rate < 1:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - a very clean dataset!"
+        elif rate < 5:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - typical for quality data."
+        elif rate < 10:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - moderate anomaly presence."
+        else:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - significant anomaly presence, investigate patterns."
+    
+    narrative += f"\n{verdict}\n"
+    
+    # Top finding - feature importance
+    if 'feature_importance' in insights and insights['feature_importance']:
+        top_feature = max(insights['feature_importance'].items(), key=lambda x: x[1]['difference'])
+        feature_name = top_feature[0]
+        stats = top_feature[1]
+        ratio = stats['anomaly_mean'] / stats['normal_mean'] if stats['normal_mean'] != 0 else 0
+        
+        narrative += f"""
+    #### 🔥 TOP FINDING
+    **'{feature_name}'** is your biggest red flag - anomalies average **{stats['anomaly_mean']:,.2f}** while normal 
+    records are around **{stats['normal_mean']:,.2f}**. That's a **{ratio:.1f}x difference**.
+    """
+    
+    # Where to look - categorical insights
+    if 'categorical_insights' in insights and insights['categorical_insights']:
+        for cat_col, cat_data in insights['categorical_insights'].items():
+            if cat_data['highest_rate']:
+                highest = cat_data['highest_rate']
+                cat_name = highest.get(cat_col, 'Unknown')
+                cat_rate = highest.get('anomaly_rate', 0)
+                cat_count = highest.get('anomaly_count', 0)
+                
+                if cat_rate > rate * 2:  # Significantly higher than average
+                    narrative += f"""
+    #### ⚠️ WHERE TO LOOK
+    **'{cat_col}' = '{cat_name}'** shows **{cat_rate:.1f}%** anomaly rate (vs {rate:.2f}% overall) with **{cat_count:,} flagged records**. 
+    Start your investigation here.
+    """
+                    break
+    
+    return narrative
+
 def create_metric_card(label: str, value: str | int) -> str:
     """Generate HTML for metric card"""
     return f"""
@@ -592,6 +694,63 @@ def create_metric_card(label: str, value: str | int) -> str:
         <div class="metric-value">{value}</div>
     </div>
     """
+
+def get_chart_narrative(chart_type: str, insights: dict = None) -> str:
+    """Generate educational narrative for each visualization"""
+    narratives = {
+        'pie': """
+        **📊 Distribution Overview**
+        
+        This shows your overall split. The **RED slice** represents records that don't fit the normal pattern - 
+        these are your outliers. If this slice is tiny (<1%), you have a clean dataset. If it's large (>10%), 
+        either your data has quality issues OR the normal pattern is very diverse.
+        """,
+        
+        'histogram': """
+        **📈 Anomaly Score Distribution**
+        
+        Anomaly scores are like 'weirdness ratings'. Records on the **RIGHT side** (high scores) are the most 
+        unusual - prioritize investigating these first. The tall bar on the left shows your normal data 
+        clustered together.
+        
+        💡 **Tip:** Focus on records with scores >7.0 for immediate action.
+        """,
+        
+        'timeseries': """
+        **⏰ Timeline Analysis**
+        
+        This timeline reveals **WHEN** anomalies happen. Spikes indicate problem periods - maybe a system glitch, 
+        fraud attack, or seasonal pattern. Look for:
+        - Sudden spikes (incidents)
+        - Gradual increases (trend changes)
+        - Weekly/monthly patterns (seasonality)
+        """,
+        
+        'scatter': """
+        **🔍 Feature Relationship**
+        
+        Each dot is a record. **RED dots** far from the GREEN cluster are your outliers. If you see a RED cluster, 
+        that's a pattern worth naming - maybe 'high-value-low-frequency' transactions.
+        
+        💡 **Tip:** Outliers in the corners are the most extreme cases.
+        """,
+        
+        'category': """
+        **📋 Category Rankings**
+        
+        This ranks categories by anomaly concentration. Categories at the **top** deserve immediate attention. 
+        If one category has 5x the average rate, that's not random - investigate the relationship.
+        """,
+        
+        'boxplot': """
+        **📦 Distribution Comparison**
+        
+        Box plots show the spread of values. **RED boxes** (anomalies) shifted away from **GREEN boxes** (normal) 
+        indicate that feature is a strong discriminator. Overlapping boxes mean that feature isn't helpful for detection.
+        """
+    }
+    
+    return narratives.get(chart_type, "")
 
 def create_visualizations(df: pd.DataFrame, numeric_cols: list, categorical_cols: list = None, date_col: str = None) -> dict:
     """Create comprehensive visualizations"""
@@ -1115,6 +1274,10 @@ with tab2:
                 method = st.selectbox("Algorithm", ['Isolation Forest', 'Local Outlier Factor', 'One-Class SVM'])
             with col2:
                 contamination = st.slider("Expected Anomaly Rate", 0.01, 0.5, 0.1, 0.01, help="0.1 = 10%")
+                
+                # Show explanation
+                with st.expander("ℹ️ What does this mean?", expanded=False):
+                    st.markdown(explain_contamination(contamination, st.session_state.row_count))
             with col3:
                 max_sample = min(50000, st.session_state.row_count) if method != 'Isolation Forest' else st.session_state.row_count
                 use_sampling = st.checkbox("Use Sampling", value=st.session_state.row_count > 50000 and method != 'Isolation Forest')
@@ -1167,6 +1330,10 @@ with tab2:
                             st.session_state.selected_categorical_cols = selected_categorical_cols
                             st.session_state.selected_date_col = date_col
                             st.session_state.selected_method = method
+                            if use_ml:
+                                st.session_state.contamination_rate = contamination
+                            else:
+                                st.session_state.contamination_rate = None
                             
                             elapsed_time = time.time() - start_time
                             
@@ -1236,33 +1403,52 @@ with tab3:
         
         st.markdown("<br>", unsafe_allow_html=True)
         
+        # Executive narrative summary
+        expected_rate = st.session_state.get('contamination_rate', None)
+        narrative = generate_narrative(insights, categorical_cols, numeric_cols, expected_rate)
+        st.markdown(narrative)
+        
+        st.markdown("---")
+        
         # Visualizations
         st.markdown("### 📈 Visualizations")
         
         figs = create_visualizations(df_results, numeric_cols, categorical_cols, date_col)
         
+        # Pie chart with narrative
         col1, col2 = st.columns(2)
         
         with col1:
             if 'pie' in figs:
+                with st.expander("ℹ️ Understanding this chart", expanded=False):
+                    st.markdown(get_chart_narrative('pie'))
                 st.plotly_chart(figs['pie'], use_container_width=True)
         
         with col2:
             if 'histogram' in figs:
+                with st.expander("ℹ️ Understanding this chart", expanded=False):
+                    st.markdown(get_chart_narrative('histogram'))
                 st.plotly_chart(figs['histogram'], use_container_width=True)
         
         if 'timeseries' in figs:
+            with st.expander("ℹ️ Understanding this chart", expanded=False):
+                st.markdown(get_chart_narrative('timeseries'))
             st.plotly_chart(figs['timeseries'], use_container_width=True)
         
         if 'scatter' in figs:
+            with st.expander("ℹ️ Understanding this chart", expanded=False):
+                st.markdown(get_chart_narrative('scatter'))
             st.plotly_chart(figs['scatter'], use_container_width=True)
         
         for key in figs.keys():
             if key.startswith('category_bar_'):
+                with st.expander("ℹ️ Understanding this chart", expanded=False):
+                    st.markdown(get_chart_narrative('category'))
                 st.plotly_chart(figs[key], use_container_width=True)
         
         if 'boxplot' in figs:
             with st.expander("📦 Box Plot Analysis"):
+                st.markdown(get_chart_narrative('boxplot'))
                 st.plotly_chart(figs['boxplot'], use_container_width=True)
         
         st.markdown("---")
@@ -1322,6 +1508,66 @@ with tab3:
         
         st.markdown("---")
         
+        # Actionable recommendations
+        if insights['anomalies'] > 0:
+            st.markdown("### 🎯 RECOMMENDED NEXT STEPS")
+            
+            high_score_count = len(df_results[df_results['anomaly_score'] > df_results['anomaly_score'].quantile(0.95)]) if 'anomaly_score' in df_results.columns else 0
+            
+            st.markdown(f"""
+            Based on your analysis, here's your action plan:
+            
+            #### 1️⃣ IMMEDIATE ACTION
+            • Export the **{insights['anomalies']:,} flagged records** using CSV button below
+            • Prioritize records with highest scores (top {high_score_count} records with score >95th percentile)
+            • Assign to review team within 24-48 hours
+            
+            #### 2️⃣ DEEP DIVE
+            Focus investigation on:
+            """)
+            
+            # Dynamic recommendations based on results
+            if 'feature_importance' in insights and insights['feature_importance']:
+                top_feature = max(insights['feature_importance'].items(), key=lambda x: x[1]['difference'])
+                st.markdown(f"• **{top_feature[0]}**: Primary differentiator (avg {top_feature[1]['anomaly_mean']:.2f} vs {top_feature[1]['normal_mean']:.2f})")
+            
+            if 'categorical_insights' in insights and insights['categorical_insights']:
+                for cat_col, cat_data in list(insights['categorical_insights'].items())[:1]:
+                    if cat_data['highest_rate']:
+                        highest = cat_data['highest_rate']
+                        st.markdown(f"• **{cat_col} = '{highest[cat_col]}'**: Highest anomaly concentration ({highest['anomaly_rate']:.1f}%)")
+            
+            if date_col:
+                st.markdown(f"• **Time patterns**: Review timeline chart for incident clusters")
+            
+            st.markdown(f"""
+            #### 3️⃣ PREVENTION
+            Consider automated rules:
+            • Set up alerts when anomaly rate exceeds {insights['anomaly_rate']*1.5:.1f}% (1.5x current)
+            • Create review queue for high-risk combinations identified above
+            • Schedule weekly anomaly trend reports
+            
+            #### 4️⃣ VALIDATE
+            • Manually review 20 random flagged records
+            • If >80% are genuinely problematic → model is well-tuned ✓
+            • If <50% are problematic → increase expected anomaly rate and re-run
+            • Document common patterns for future reference
+            """)
+        else:
+            st.markdown("### ✅ CLEAN DATASET DETECTED")
+            st.markdown(f"""
+            Great news! No significant anomalies found (0 out of {insights['total_records']:,} records).
+            
+            **This could mean:**
+            • Your data is genuinely clean ✓
+            • Expected rate was too strict - try lowering threshold
+            • Selected features don't capture unusual patterns - try different columns
+            
+            💡 **Next Step:** Try Z-Score method with threshold 2.5 for more sensitive detection.
+            """)
+        
+        st.markdown("---")
+        
         # Export
         st.markdown("### 💾 Export Results")
         
@@ -1365,7 +1611,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Hunter Pro</b> | Developed by CE Innovations Lab 2025<br>
+        🎯 <b>Anomaly Hunter Pro</b> | 2025<br>
         Powered by DuckDB • PyArrow • Scikit-learn • Plotly
     </p>
 </div>
