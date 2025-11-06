@@ -297,80 +297,26 @@ def detect_file_type(file) -> str | None:
         case '.parquet': return 'parquet'
         case _: return None
 
-@st.cache_data(ttl=3600)
 def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
-    """Convert various file formats to Parquet with true streaming for large files"""
+    """Convert various file formats to Parquet - simple and reliable"""
     try:
         progress = st.progress(0, text="🔄 Reading file...")
         
         parquet_path = os.path.join(st.session_state.temp_dir, 'data.parquet')
         
-        # Read based on file type using match/case
+        # Read based on file type
         match file_type:
             case 'csv':
-                # Check file size for streaming
-                file.seek(0, 2)  # Seek to end
-                file_size = file.tell()
-                file.seek(0)  # Reset
-                
-                # Use TRUE streaming for files > 50MB
-                if file_size > 50 * 1024 * 1024:  # 50MB
-                    progress.progress(20, text="📦 Streaming large file...")
-                    
-                    # Read in chunks - write immediately, don't accumulate
-                    chunk_iter = pd.read_csv(file, low_memory=False, encoding='utf-8', 
-                                            encoding_errors='replace', chunksize=25000)
-                    
-                    total_rows = 0
-                    col_count = 0
-                    writer = None
-                    
-                    for i, chunk in enumerate(chunk_iter):
-                        # Quick type optimization per chunk
-                        for col in chunk.select_dtypes(include=['float64']).columns:
-                            chunk[col] = pd.to_numeric(chunk[col], downcast='float', errors='coerce')
-                        
-                        for col in chunk.select_dtypes(include=['int64']).columns:
-                            chunk[col] = pd.to_numeric(chunk[col], downcast='integer', errors='coerce')
-                        
-                        # Convert chunk to PyArrow table
-                        table = pa.Table.from_pandas(chunk)
-                        
-                        if writer is None:
-                            # First chunk - create writer with schema
-                            writer = pq.ParquetWriter(parquet_path, table.schema, compression='snappy')
-                            col_count = len(chunk.columns)
-                        
-                        # Write this chunk immediately (streaming)
-                        writer.write_table(table)
-                        total_rows += len(chunk)
-                        
-                        # Clear chunk from memory
-                        del chunk
-                        del table
-                        
-                        if i % 3 == 0:
-                            progress.progress(min(80, 20 + i * 2), 
-                                            text=f"📦 Streamed {total_rows:,} rows...")
-                    
-                    # Close writer
-                    if writer:
-                        writer.close()
-                    
-                    progress.progress(100, text="✅ Conversion complete!")
-                    time.sleep(0.5)
-                    progress.empty()
-                    
-                    return parquet_path, total_rows, col_count
-                else:
-                    # Small file - load normally
-                    df = pd.read_csv(file, low_memory=False, encoding='utf-8', encoding_errors='replace')
+                progress.progress(30, text="📦 Processing CSV...")
+                df = pd.read_csv(file, low_memory=False, encoding='utf-8', encoding_errors='replace')
                     
             case 'xlsx' | 'xls':
+                progress.progress(30, text="📦 Processing Excel...")
                 engine = 'openpyxl' if file_type == 'xlsx' else 'xlrd'
                 df = pd.read_excel(file, engine=engine)
                 
             case 'txt':
+                progress.progress(30, text="📦 Processing text file...")
                 file.seek(0)
                 sample = file.read(1024).decode('utf-8', errors='replace')
                 file.seek(0)
@@ -379,32 +325,21 @@ def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
                                encoding='utf-8', encoding_errors='replace')
                 
             case 'parquet':
-                # Already parquet, just copy
+                progress.progress(30, text="📦 Loading Parquet...")
                 df = pd.read_parquet(file)
-                parquet_path_direct = os.path.join(st.session_state.temp_dir, 'data.parquet')
-                df.to_parquet(parquet_path_direct, compression='snappy')
+                df.to_parquet(parquet_path, compression='snappy')
                 progress.progress(100, text="✅ File ready!")
                 time.sleep(0.5)
                 progress.empty()
-                return parquet_path_direct, df.shape[0], df.shape[1]
+                return parquet_path, df.shape[0], df.shape[1]
                 
             case _:
                 raise ValueError(f"Unsupported file type: {file_type}")
         
-        progress.progress(40, text="🔧 Optimizing data types...")
+        progress.progress(70, text="💾 Converting to Parquet...")
         
-        # Quick type optimization
-        for col in df.select_dtypes(include=['float64']).columns:
-            df[col] = pd.to_numeric(df[col], downcast='float', errors='coerce')
-        
-        for col in df.select_dtypes(include=['int64']).columns:
-            df[col] = pd.to_numeric(df[col], downcast='integer', errors='coerce')
-        
-        progress.progress(70, text="💾 Converting to Parquet format...")
-        
-        # Save as Parquet
-        table = pa.Table.from_pandas(df)
-        pq.write_table(table, parquet_path, compression='snappy')
+        # Save directly - let pandas/pyarrow handle optimization
+        df.to_parquet(parquet_path, compression='snappy', engine='pyarrow')
         
         progress.progress(100, text="✅ Conversion complete!")
         time.sleep(0.5)
