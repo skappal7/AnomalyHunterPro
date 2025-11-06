@@ -1365,7 +1365,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Hunter Pro</b> | 2025<br>
+        🎯 <b>Anomaly Hunter Pro</b> | Developed by CE Innovations Lab 2025<br>
         Powered by DuckDB • PyArrow • Scikit-learn • Plotly
     </p>
 </div>
