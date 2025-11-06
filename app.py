@@ -317,40 +317,39 @@ def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
                 if file_size > 50 * 1024 * 1024:  # 50MB
                     progress.progress(20, text="📦 Processing large file in chunks...")
                     
-                    # Read in chunks
+                    # Read in chunks and concatenate
+                    chunks = []
                     chunk_iter = pd.read_csv(file, low_memory=False, encoding='utf-8', 
                                             encoding_errors='replace', chunksize=50000)
                     
-                    first_chunk = True
                     total_rows = 0
-                    
                     for i, chunk in enumerate(chunk_iter):
-                        if first_chunk:
-                            # Write first chunk with schema
-                            table = pa.Table.from_pandas(chunk)
-                            pq.write_table(table, parquet_path, compression='snappy')
-                            first_chunk = False
-                            total_rows = len(chunk)
-                        else:
-                            # Append subsequent chunks
-                            table = pa.Table.from_pandas(chunk)
-                            pq.write_table(table, parquet_path, compression='snappy', 
-                                         append=True)
-                            total_rows += len(chunk)
+                        # Quick type optimization per chunk
+                        for col in chunk.select_dtypes(include=['float64']).columns:
+                            chunk[col] = pd.to_numeric(chunk[col], downcast='float', errors='coerce')
+                        
+                        for col in chunk.select_dtypes(include=['int64']).columns:
+                            chunk[col] = pd.to_numeric(chunk[col], downcast='integer', errors='coerce')
+                        
+                        chunks.append(chunk)
+                        total_rows += len(chunk)
                         
                         if i % 5 == 0:
-                            progress.progress(min(80, 20 + i * 5), 
+                            progress.progress(min(70, 20 + i * 3), 
                                             text=f"📦 Processed {total_rows:,} rows...")
                     
-                    # Get column count from first chunk
-                    df_sample = pd.read_parquet(parquet_path, nrows=1)
-                    col_count = len(df_sample.columns)
+                    progress.progress(75, text="💾 Writing to Parquet...")
+                    
+                    # Concatenate all chunks and write once
+                    df = pd.concat(chunks, ignore_index=True)
+                    table = pa.Table.from_pandas(df)
+                    pq.write_table(table, parquet_path, compression='snappy')
                     
                     progress.progress(100, text="✅ Conversion complete!")
                     time.sleep(0.5)
                     progress.empty()
                     
-                    return parquet_path, total_rows, col_count
+                    return parquet_path, df.shape[0], df.shape[1]
                 else:
                     # Small file - load normally
                     df = pd.read_csv(file, low_memory=False, encoding='utf-8', encoding_errors='replace')
@@ -382,7 +381,7 @@ def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
         
         progress.progress(40, text="🔧 Optimizing data types...")
         
-        # Quick type optimization without expensive datetime detection
+        # Quick type optimization
         for col in df.select_dtypes(include=['float64']).columns:
             df[col] = pd.to_numeric(df[col], downcast='float', errors='coerce')
         
