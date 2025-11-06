@@ -299,7 +299,7 @@ def detect_file_type(file) -> str | None:
 
 @st.cache_data(ttl=3600)
 def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
-    """Convert various file formats to Parquet with chunked processing for large files"""
+    """Convert various file formats to Parquet with true streaming for large files"""
     try:
         progress = st.progress(0, text="🔄 Reading file...")
         
@@ -308,21 +308,23 @@ def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
         # Read based on file type using match/case
         match file_type:
             case 'csv':
-                # Check file size for chunked processing
+                # Check file size for streaming
                 file.seek(0, 2)  # Seek to end
                 file_size = file.tell()
                 file.seek(0)  # Reset
                 
-                # Use chunked processing for files > 50MB
+                # Use TRUE streaming for files > 50MB
                 if file_size > 50 * 1024 * 1024:  # 50MB
-                    progress.progress(20, text="📦 Processing large file in chunks...")
+                    progress.progress(20, text="📦 Streaming large file...")
                     
-                    # Read in chunks and concatenate
-                    chunks = []
+                    # Read in chunks - write immediately, don't accumulate
                     chunk_iter = pd.read_csv(file, low_memory=False, encoding='utf-8', 
-                                            encoding_errors='replace', chunksize=50000)
+                                            encoding_errors='replace', chunksize=25000)
                     
                     total_rows = 0
+                    col_count = 0
+                    writer = None
+                    
                     for i, chunk in enumerate(chunk_iter):
                         # Quick type optimization per chunk
                         for col in chunk.select_dtypes(include=['float64']).columns:
@@ -331,25 +333,35 @@ def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
                         for col in chunk.select_dtypes(include=['int64']).columns:
                             chunk[col] = pd.to_numeric(chunk[col], downcast='integer', errors='coerce')
                         
-                        chunks.append(chunk)
+                        # Convert chunk to PyArrow table
+                        table = pa.Table.from_pandas(chunk)
+                        
+                        if writer is None:
+                            # First chunk - create writer with schema
+                            writer = pq.ParquetWriter(parquet_path, table.schema, compression='snappy')
+                            col_count = len(chunk.columns)
+                        
+                        # Write this chunk immediately (streaming)
+                        writer.write_table(table)
                         total_rows += len(chunk)
                         
-                        if i % 5 == 0:
-                            progress.progress(min(70, 20 + i * 3), 
-                                            text=f"📦 Processed {total_rows:,} rows...")
+                        # Clear chunk from memory
+                        del chunk
+                        del table
+                        
+                        if i % 3 == 0:
+                            progress.progress(min(80, 20 + i * 2), 
+                                            text=f"📦 Streamed {total_rows:,} rows...")
                     
-                    progress.progress(75, text="💾 Writing to Parquet...")
-                    
-                    # Concatenate all chunks and write once
-                    df = pd.concat(chunks, ignore_index=True)
-                    table = pa.Table.from_pandas(df)
-                    pq.write_table(table, parquet_path, compression='snappy')
+                    # Close writer
+                    if writer:
+                        writer.close()
                     
                     progress.progress(100, text="✅ Conversion complete!")
                     time.sleep(0.5)
                     progress.empty()
                     
-                    return parquet_path, df.shape[0], df.shape[1]
+                    return parquet_path, total_rows, col_count
                 else:
                     # Small file - load normally
                     df = pd.read_csv(file, low_memory=False, encoding='utf-8', encoding_errors='replace')
