@@ -299,50 +299,99 @@ def detect_file_type(file) -> str | None:
 
 @st.cache_data(ttl=3600)
 def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
-    """Convert various file formats to Parquet"""
+    """Convert various file formats to Parquet with chunked processing for large files"""
     try:
         progress = st.progress(0, text="🔄 Reading file...")
+        
+        parquet_path = os.path.join(st.session_state.temp_dir, 'data.parquet')
         
         # Read based on file type using match/case
         match file_type:
             case 'csv':
-                df = pd.read_csv(file, low_memory=False, encoding='utf-8', encoding_errors='replace')
+                # Check file size for chunked processing
+                file.seek(0, 2)  # Seek to end
+                file_size = file.tell()
+                file.seek(0)  # Reset
+                
+                # Use chunked processing for files > 50MB
+                if file_size > 50 * 1024 * 1024:  # 50MB
+                    progress.progress(20, text="📦 Processing large file in chunks...")
+                    
+                    # Read in chunks
+                    chunk_iter = pd.read_csv(file, low_memory=False, encoding='utf-8', 
+                                            encoding_errors='replace', chunksize=50000)
+                    
+                    first_chunk = True
+                    total_rows = 0
+                    
+                    for i, chunk in enumerate(chunk_iter):
+                        if first_chunk:
+                            # Write first chunk with schema
+                            table = pa.Table.from_pandas(chunk)
+                            pq.write_table(table, parquet_path, compression='snappy')
+                            first_chunk = False
+                            total_rows = len(chunk)
+                        else:
+                            # Append subsequent chunks
+                            table = pa.Table.from_pandas(chunk)
+                            pq.write_table(table, parquet_path, compression='snappy', 
+                                         append=True)
+                            total_rows += len(chunk)
+                        
+                        if i % 5 == 0:
+                            progress.progress(min(80, 20 + i * 5), 
+                                            text=f"📦 Processed {total_rows:,} rows...")
+                    
+                    # Get column count from first chunk
+                    df_sample = pd.read_parquet(parquet_path, nrows=1)
+                    col_count = len(df_sample.columns)
+                    
+                    progress.progress(100, text="✅ Conversion complete!")
+                    time.sleep(0.5)
+                    progress.empty()
+                    
+                    return parquet_path, total_rows, col_count
+                else:
+                    # Small file - load normally
+                    df = pd.read_csv(file, low_memory=False, encoding='utf-8', encoding_errors='replace')
+                    
             case 'xlsx' | 'xls':
                 engine = 'openpyxl' if file_type == 'xlsx' else 'xlrd'
                 df = pd.read_excel(file, engine=engine)
+                
             case 'txt':
                 file.seek(0)
                 sample = file.read(1024).decode('utf-8', errors='replace')
                 file.seek(0)
                 delimiter = ',' if ',' in sample else '\t' if '\t' in sample else None
-                df = pd.read_csv(file, delimiter=delimiter, low_memory=False, encoding='utf-8', encoding_errors='replace')
+                df = pd.read_csv(file, delimiter=delimiter, low_memory=False, 
+                               encoding='utf-8', encoding_errors='replace')
+                
             case 'parquet':
+                # Already parquet, just copy
                 df = pd.read_parquet(file)
+                parquet_path_direct = os.path.join(st.session_state.temp_dir, 'data.parquet')
+                df.to_parquet(parquet_path_direct, compression='snappy')
+                progress.progress(100, text="✅ File ready!")
+                time.sleep(0.5)
+                progress.empty()
+                return parquet_path_direct, df.shape[0], df.shape[1]
+                
             case _:
                 raise ValueError(f"Unsupported file type: {file_type}")
         
-        progress.progress(30, text="🔧 Optimizing data types...")
+        progress.progress(40, text="🔧 Optimizing data types...")
         
-        # Optimize data types
+        # Quick type optimization without expensive datetime detection
         for col in df.select_dtypes(include=['float64']).columns:
             df[col] = pd.to_numeric(df[col], downcast='float', errors='coerce')
         
         for col in df.select_dtypes(include=['int64']).columns:
             df[col] = pd.to_numeric(df[col], downcast='integer', errors='coerce')
         
-        # Auto-detect datetime columns
-        for col in df.select_dtypes(include=['object']).columns:
-            if df[col].dtype == 'object' and df[col].notna().sum() > 0:
-                try:
-                    sample = df[col].dropna().iloc[0]
-                    if isinstance(sample, str) and any(char.isdigit() for char in sample):
-                        df[col] = pd.to_datetime(df[col], errors='ignore')
-                except:
-                    pass
+        progress.progress(70, text="💾 Converting to Parquet format...")
         
-        progress.progress(60, text="💾 Converting to Parquet format...")
-        
-        parquet_path = os.path.join(st.session_state.temp_dir, 'data.parquet')
+        # Save as Parquet
         table = pa.Table.from_pandas(df)
         pq.write_table(table, parquet_path, compression='snappy')
         
@@ -354,6 +403,8 @@ def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
         
     except Exception as e:
         st.error(f"❌ Error converting file: {e}")
+        import traceback
+        st.error(traceback.format_exc())
         return None, 0, 0
 
 def initialize_duckdb():
