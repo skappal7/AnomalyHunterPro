@@ -102,7 +102,7 @@ st.markdown("""
     
     .metric-card {
         background: white;
-        padding: 1.5rem;
+        padding: 1rem;
         border-radius: 10px;
         box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
         text-align: center;
@@ -116,14 +116,14 @@ st.markdown("""
     }
     
     .metric-value {
-        font-size: 2rem;
+        font-size: 1.75rem;
         font-weight: 700;
-        margin: 0.5rem 0;
+        margin: 0.25rem 0;
         color: #1e293b;
     }
     
     .metric-label {
-        font-size: 0.875rem;
+        font-size: 0.75rem;
         color: #64748b;
         font-weight: 600;
         text-transform: uppercase;
@@ -274,11 +274,13 @@ def display_lottie(lottie_json: dict | None, height: int = 200, key: str = None)
 
 # Lottie animation URLs (free from LottieFiles)
 LOTTIE_URLS = {
-    'upload': 'https://lottie.host/0c2c7b1e-4c96-4c3e-9c3d-3c8e5e3c8e5e/N6GqXqGvJR.json',
-    'processing': 'https://lottie.host/647b5f86-0e6a-4fae-af44-84b2f5fc5e5e/OYHYGk4OGU.json',
-    'success': 'https://lottie.host/95a1b0e1-e2e6-4d1e-8c8e-3e3e3e3e3e3e/TjjKdqGqGq.json',
-    'empty': 'https://lottie.host/4e8c5e3c-8e5e-4c3e-9c3d-3c8e5e3c8e5e/ZqGqGqGqGq.json',
+    'upload': 'https://lottie.host/4db68bac-31f6-4cd8-b6ea-bf9d3e48ede6/RPi1P52OG9.json',
+    'processing': 'https://lottie.host/ab5fc9ae-bb83-4176-b096-5c1d8cf3920a/HXmKgSKgYD.json',
+    'success': 'https://lottie.host/647a0d77-d5c1-4c2e-9b72-0a3b56b23fb7/Mo5ZtXe5Xh.json',
+    'empty': 'https://lottie.host/3c2c0b5c-8e5e-4d3e-9c3d-3c8e5e3c8e5e/QqGqGqGqGq.json',
+    'hero': 'https://lottie.host/c9b0eaef-3b23-4e2d-b2a4-7baf9f0c5f5a/jIgWqKgLq1.json'
 }
+
 
 
 
@@ -1030,13 +1032,22 @@ def generate_pdf_report(insights: dict, categorical_cols: list, numeric_cols: li
 # MAIN APP
 # =============================================================================
 
-# Header
-st.markdown("""
-<div class="main-header">
-    <h1>🎯 Anomaly Hunter Pro</h1>
-    <p>Enterprise-Grade Anomaly Detection Platform</p>
-</div>
-""", unsafe_allow_html=True)
+# Header with hero animation
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.markdown("""
+    <div class="main-header">
+        <h1>🎯 Anomaly Hunter Pro</h1>
+        <p>Enterprise-Grade Anomaly Detection Platform</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col2:
+    lottie_hero = load_lottie_url(LOTTIE_URLS['hero'])
+    if lottie_hero:
+        display_lottie(lottie_hero, height=180, key="hero_animation")
+
 
 # Sidebar
 with st.sidebar:
@@ -1640,8 +1651,8 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Hunter Pro</b> | 2025<br>
-        Powered by DuckDB • PyArrow • Scikit-learn • Plotly
+        🎯 <b>Anomaly Hunter Pro</b> | Developed by CE Innovations Team 2025<br>
+        Powered by DuckDB • PyArrow • Scikit-learn • Plotly | A Run Better Initiative
     </p>
 </div>
 """, unsafe_allow_html=True)
