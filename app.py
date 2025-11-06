@@ -10,9 +10,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# Keep pandas off Arrow-backed dtypes (extra guard on hosted envs)
-pd.set_option("mode.dtype_backend", "numpy_nullable")
-
 # Safe libs together on Streamlit Cloud (no pyarrow):
 import duckdb
 from fastparquet import write  # ensure fastparquet is present
