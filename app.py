@@ -276,7 +276,7 @@ def display_lottie(lottie_json: dict | None, height: int = 200, key: str = None)
 LOTTIE_URLS = {
     'upload': 'https://lottie.host/6dadc34a-b444-48fb-a796-e6b8b5a54172/QtBAFnRjNv.json',
     'processing': 'https://lottie.host/74287700-bcf8-489b-a4da-7f749e114c3c/mxSexILitR.json',
-    'success': 'https://lottie.host/b5ffb76b-9bf3-45a4-a216-2f3dd30d951d/4hO7461Rsc.json',
+    'success': 'https://lottie.host/68f99417-882d-48e7-990d-1db441c73c7e/7zNWZQiOK0.json',
     'empty': 'https://lottie.host/415990e8-43a1-44db-a967-cb4f989c7dda/kZDZtv4i60.json',
     'hero': 'https://lottie.host/35b4b211-d909-41e5-8ea6-cfd26d9ee338/Un0LjC6t8a.json'
 }
