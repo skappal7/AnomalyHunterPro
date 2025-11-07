@@ -274,11 +274,11 @@ def display_lottie(lottie_json: dict | None, height: int = 200, key: str = None)
 
 # Lottie animation URLs (free from LottieFiles)
 LOTTIE_URLS = {
-    'upload': 'https://lottie.host/4db68bac-31f6-4cd8-b6ea-bf9d3e48ede6/RPi1P52OG9.json',
-    'processing': 'https://lottie.host/ab5fc9ae-bb83-4176-b096-5c1d8cf3920a/HXmKgSKgYD.json',
-    'success': 'https://lottie.host/647a0d77-d5c1-4c2e-9b72-0a3b56b23fb7/Mo5ZtXe5Xh.json',
-    'empty': 'https://lottie.host/3c2c0b5c-8e5e-4d3e-9c3d-3c8e5e3c8e5e/QqGqGqGqGq.json',
-    'hero': 'https://lottie.host/c9b0eaef-3b23-4e2d-b2a4-7baf9f0c5f5a/jIgWqKgLq1.json'
+    'upload': 'https://lottie.host/6dadc34a-b444-48fb-a796-e6b8b5a54172/QtBAFnRjNv.json',
+    'processing': 'https://lottie.host/74287700-bcf8-489b-a4da-7f749e114c3c/mxSexILitR.json',
+    'success': 'https://lottie.host/b5ffb76b-9bf3-45a4-a216-2f3dd30d951d/4hO7461Rsc.json',
+    'empty': 'https://lottie.host/415990e8-43a1-44db-a967-cb4f989c7dda/kZDZtv4i60.json',
+    'hero': 'https://lottie.host/6dadc34a-b444-48fb-a796-e6b8b5a54172/QtBAFnRjNv.json'
 }
 
 
