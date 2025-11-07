@@ -278,7 +278,7 @@ LOTTIE_URLS = {
     'processing': 'https://lottie.host/74287700-bcf8-489b-a4da-7f749e114c3c/mxSexILitR.json',
     'success': 'https://lottie.host/b5ffb76b-9bf3-45a4-a216-2f3dd30d951d/4hO7461Rsc.json',
     'empty': 'https://lottie.host/415990e8-43a1-44db-a967-cb4f989c7dda/kZDZtv4i60.json',
-    'hero': 'https://lottie.host/ba6b6c56-24af-4852-82b4-0866150109d9/Et1pdmF5zs.json'
+    'hero': 'https://lottie.host/35b4b211-d909-41e5-8ea6-cfd26d9ee338/Un0LjC6t8a.json'
 }
 
 
