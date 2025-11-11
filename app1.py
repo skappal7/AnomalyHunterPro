@@ -91,14 +91,14 @@ st.markdown("""
         font-size: 2.5rem;
         font-weight: 700;
         margin-bottom: 0.5rem;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #5a67d8 0%, #667eea 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         background-clip: text;
     }
     
     h2 {
-        color: #2d3748;
+        color: #1a202c;
         font-size: 1.5rem;
         font-weight: 600;
         margin: 2rem 0 1rem 0;
@@ -107,10 +107,18 @@ st.markdown("""
     }
     
     h3 {
-        color: #4a5568;
+        color: #2d3748;
         font-size: 1.2rem;
         font-weight: 600;
         margin: 1.5rem 0 0.75rem 0;
+    }
+    
+    p, li, span, label {
+        color: #2d3748 !important;
+    }
+    
+    .stMarkdown {
+        color: #2d3748;
     }
     
     .stButton button {
@@ -345,7 +353,7 @@ def convert_to_parquet(file, file_type: str) -> Tuple[Optional[str], int, int]:
 
 def get_duckdb_con():
     """Get or create DuckDB connection"""
-    if st.session_state.duckdb_con is None:
+    if 'duckdb_con' not in st.session_state or st.session_state.duckdb_con is None:
         st.session_state.duckdb_con = duckdb.connect(':memory:')
     return st.session_state.duckdb_con
 
@@ -379,6 +387,7 @@ def get_column_stats(con, parquet_path: str) -> Dict:
 
 def detect_anomalies_statistical(con, parquet_path: str, cols: List[str], method: str, threshold: float) -> Optional[pd.DataFrame]:
     """Statistical anomaly detection using DuckDB SQL"""
+    df = None
     try:
         if method == 'zscore':
             zscore_parts = [f'ABS(("{col}" - AVG("{col}") OVER ()) / NULLIF(STDDEV("{col}") OVER (), 0)) as zscore_{col}' 
@@ -410,11 +419,16 @@ def detect_anomalies_statistical(con, parquet_path: str, cols: List[str], method
             conditions = [f'("{col}" < {percentiles[col]["lower"]} OR "{col}" > {percentiles[col]["upper"]})' 
                          for col in cols]
             query = f"""
-                SELECT *, 
-                    CASE WHEN {' OR '.join(conditions)} THEN 1 ELSE 0 END as anomaly
+                SELECT *
                 FROM parquet_scan('{parquet_path}')
             """
             df = con.execute(query).df()
+            
+            # Add anomaly flag based on conditions
+            df['anomaly'] = 0
+            for col in cols:
+                lower, upper = percentiles[col]['lower'], percentiles[col]['upper']
+                df.loc[(df[col] < lower) | (df[col] > upper), 'anomaly'] = 1
             
             # Calculate anomaly scores
             scores = []
@@ -453,6 +467,8 @@ def detect_anomalies_statistical(con, parquet_path: str, cols: List[str], method
         
     except Exception as e:
         st.error(f"Statistical detection error: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
 def detect_anomalies_ml(df: pd.DataFrame, cols: List[str], method: str, contamination: float) -> Optional[pd.DataFrame]:
@@ -733,7 +749,7 @@ def engineer_feature(con, parquet_path: str, feature_name: str, expression: str)
 
 # Main UI
 st.title("🎯 Anomaly Hunter Pro")
-st.markdown("**Enterprise-Grade Anomaly Detection Platform** • Powered by Advanced ML & Statistical Methods")
+st.markdown("<p style='color: #4a5568; font-size: 1.1rem; font-weight: 500;'>Enterprise-Grade Anomaly Detection Platform • Powered by Advanced ML & Statistical Methods</p>", unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
@@ -774,7 +790,7 @@ with st.sidebar:
                        if any(t in info['type'].upper() for t in ['INT', 'DOUBLE', 'DECIMAL', 'FLOAT', 'NUMERIC'])]
         
         categorical_cols = [col for col, info in st.session_state.column_info.items()
-                          if 'VARCHAR' in info['type'].upper() and info['distinct'] < 100]
+                          if 'VARCHAR' in info['type'].upper() and info['distinct'] < 500]  # Increased from 100 to 500
         
         date_cols = [col for col, info in st.session_state.column_info.items()
                     if any(t in info['type'].upper() for t in ['DATE', 'TIMESTAMP'])]
@@ -894,12 +910,24 @@ with st.sidebar:
         if st.session_state.data_loaded:
             st.markdown("---")
             if st.button("🗑️ Clear Data", use_container_width=True):
-                # Reset session state
-                for key in list(st.session_state.keys()):
-                    if key not in ['temp_dir', 'initialized']:
-                        del st.session_state[key]
+                # Close DuckDB connection first
+                if 'duckdb_con' in st.session_state and st.session_state.duckdb_con is not None:
+                    try:
+                        st.session_state.duckdb_con.close()
+                    except:
+                        pass
+                
+                # Reset critical keys
+                st.session_state.parquet_path = None
+                st.session_state.duckdb_con = None
                 st.session_state.data_loaded = False
+                st.session_state.row_count = 0
+                st.session_state.column_info = {}
                 st.session_state.results_df = None
+                st.session_state.selected_numeric = []
+                st.session_state.selected_categorical = []
+                st.session_state.selected_date = None
+                
                 st.rerun()
 
 # Main content area
