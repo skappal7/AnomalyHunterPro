@@ -39,7 +39,7 @@ if 'initialized' not in st.session_state:
     st.session_state.engineered_features = []
     st.session_state.analysis_history = []
 
-# Professional eye-candy UI theme with better readability
+# Professional light UI theme - Complete light grey and white
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -51,20 +51,29 @@ st.markdown("""
     .main .block-container {
         max-width: 1600px;
         padding: 1.5rem 2rem 3rem 2rem;
+        background-color: #ffffff;
     }
     
+    /* Light grey sidebar */
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #1a1d29 0%, #2d3748 100%);
+        background: linear-gradient(180deg, #f8f9fa 0%, #e9ecef 100%);
         padding-top: 2rem;
+        border-right: 1px solid #dee2e6;
     }
     
     [data-testid="stSidebar"] * {
-        color: white !important;
+        color: #1a202c !important;
+    }
+    
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {
+        color: #1a202c !important;
+        font-weight: 600;
     }
     
     [data-testid="stSidebar"] .stButton button {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        color: white !important;
         border: none;
         width: 100%;
         padding: 0.65rem;
@@ -79,22 +88,28 @@ st.markdown("""
         box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
     }
     
+    /* Fix dropdown text colors */
     [data-testid="stSidebar"] .stSelectbox label,
     [data-testid="stSidebar"] .stMultiSelect label,
-    [data-testid="stSidebar"] .stSlider label {
-        color: #e2e8f0 !important;
+    [data-testid="stSidebar"] .stSlider label,
+    [data-testid="stSidebar"] .stRadio label,
+    [data-testid="stSidebar"] label {
+        color: #1a202c !important;
         font-weight: 500;
     }
     
+    [data-testid="stSidebar"] [data-baseweb="select"] > div,
+    [data-testid="stSidbar"] [data-baseweb="select"] span,
+    [data-testid="stSidebar"] input {
+        color: #1a202c !important;
+    }
+    
+    /* Main content */
     h1 {
         color: #1a202c;
         font-size: 2.5rem;
         font-weight: 700;
         margin-bottom: 0.5rem;
-        background: linear-gradient(135deg, #5a67d8 0%, #667eea 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
     }
     
     h2 {
@@ -121,9 +136,10 @@ st.markdown("""
         color: #2d3748;
     }
     
+    /* Main area buttons */
     .stButton button {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        color: white !important;
         border: none;
         padding: 0.65rem 1.5rem;
         font-weight: 600;
@@ -244,7 +260,7 @@ st.markdown("""
     
     .stTabs [data-baseweb="tab"] {
         background: white;
-        color: #4a5568;
+        color: #4a5568 !important;
         border: 1px solid #e2e8f0;
         border-radius: 6px;
         padding: 0.65rem 1.5rem;
@@ -258,7 +274,7 @@ st.markdown("""
     
     .stTabs [data-baseweb="tab"][aria-selected="true"] {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        color: white !important;
         border: none;
     }
     
@@ -270,6 +286,23 @@ st.markdown("""
         margin: 2rem 0;
         border: none;
         border-top: 2px solid #e2e8f0;
+    }
+    
+    /* Fix all select/input text to be dark */
+    [data-baseweb="select"] > div,
+    [data-baseweb="select"] span,
+    input,
+    textarea {
+        color: #1a202c !important;
+    }
+    
+    /* Radio buttons text */
+    .stRadio > div {
+        color: #1a202c !important;
+    }
+    
+    .stRadio label {
+        color: #1a202c !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -810,12 +843,13 @@ with st.sidebar:
         st.markdown("---")
         st.markdown("## ⚙️ Configuration")
         
-        # Get column lists - FIXED: Increased categorical limit to 500
+        # Get column lists - FIXED: NO CAPS on categorical columns
         numeric_cols = [col for col, info in st.session_state.column_info.items() 
                        if any(t in info['type'].upper() for t in ['INT', 'DOUBLE', 'DECIMAL', 'FLOAT', 'NUMERIC'])]
         
+        # Show ALL categorical columns - no distinct value limit
         categorical_cols = [col for col, info in st.session_state.column_info.items()
-                          if 'VARCHAR' in info['type'].upper() and info['distinct'] < 500]  # FIXED: Was 100
+                          if any(t in info['type'].upper() for t in ['VARCHAR', 'TEXT', 'STRING'])]
         
         date_cols = [col for col, info in st.session_state.column_info.items()
                     if any(t in info['type'].upper() for t in ['DATE', 'TIMESTAMP'])]
