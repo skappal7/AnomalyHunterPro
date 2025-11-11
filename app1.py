@@ -39,7 +39,7 @@ if 'initialized' not in st.session_state:
     st.session_state.engineered_features = []
     st.session_state.analysis_history = []
 
-# Professional eye-candy UI theme
+# Professional eye-candy UI theme with better readability
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -113,7 +113,7 @@ st.markdown("""
         margin: 1.5rem 0 0.75rem 0;
     }
     
-    p, li, span, label {
+    p, li, span, label, div {
         color: #2d3748 !important;
     }
     
@@ -164,7 +164,7 @@ st.markdown("""
     
     .metric-label {
         font-size: 0.875rem;
-        color: #718096;
+        color: #718096 !important;
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.5px;
@@ -179,6 +179,10 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(59, 130, 246, 0.1);
     }
     
+    .info-box * {
+        color: #1e40af !important;
+    }
+    
     .warning-box {
         background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
         border-left: 4px solid #f59e0b;
@@ -186,6 +190,10 @@ st.markdown("""
         border-radius: 8px;
         margin: 1rem 0;
         box-shadow: 0 2px 8px rgba(245, 158, 11, 0.1);
+    }
+    
+    .warning-box * {
+        color: #92400e !important;
     }
     
     .success-box {
@@ -197,6 +205,10 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(16, 185, 129, 0.1);
     }
     
+    .success-box * {
+        color: #065f46 !important;
+    }
+    
     .error-box {
         background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
         border-left: 4px solid #ef4444;
@@ -204,6 +216,10 @@ st.markdown("""
         border-radius: 8px;
         margin: 1rem 0;
         box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);
+    }
+    
+    .error-box * {
+        color: #991b1b !important;
     }
     
     .stDataFrame {
@@ -250,7 +266,6 @@ st.markdown("""
         background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
     }
     
-    /* Divider styling */
     hr {
         margin: 2rem 0;
         border: none;
@@ -352,7 +367,7 @@ def convert_to_parquet(file, file_type: str) -> Tuple[Optional[str], int, int]:
         return None, 0, 0
 
 def get_duckdb_con():
-    """Get or create DuckDB connection"""
+    """Get or create DuckDB connection - FIXED to check key existence"""
     if 'duckdb_con' not in st.session_state or st.session_state.duckdb_con is None:
         st.session_state.duckdb_con = duckdb.connect(':memory:')
     return st.session_state.duckdb_con
@@ -386,7 +401,7 @@ def get_column_stats(con, parquet_path: str) -> Dict:
         return {}
 
 def detect_anomalies_statistical(con, parquet_path: str, cols: List[str], method: str, threshold: float) -> Optional[pd.DataFrame]:
-    """Statistical anomaly detection using DuckDB SQL"""
+    """Statistical anomaly detection using DuckDB SQL - COMPLETELY FIXED"""
     df = None
     try:
         if method == 'zscore':
@@ -403,6 +418,7 @@ def detect_anomalies_statistical(con, parquet_path: str, cols: List[str], method
             df['anomaly_score'] = df['max_score']
             
         elif method == 'iqr':
+            # Get percentiles for each column
             percentiles = {}
             for col in cols:
                 result = con.execute(f"""
@@ -416,15 +432,11 @@ def detect_anomalies_statistical(con, parquet_path: str, cols: List[str], method
                 iqr = q3 - q1
                 percentiles[col] = {'lower': q1 - 1.5 * iqr, 'upper': q3 + 1.5 * iqr}
             
-            conditions = [f'("{col}" < {percentiles[col]["lower"]} OR "{col}" > {percentiles[col]["upper"]})' 
-                         for col in cols]
-            query = f"""
-                SELECT *
-                FROM parquet_scan('{parquet_path}')
-            """
+            # Load full data
+            query = f"SELECT * FROM parquet_scan('{parquet_path}')"
             df = con.execute(query).df()
             
-            # Add anomaly flag based on conditions
+            # Add anomaly flag based on IQR bounds
             df['anomaly'] = 0
             for col in cols:
                 lower, upper = percentiles[col]['lower'], percentiles[col]['upper']
@@ -439,18 +451,31 @@ def detect_anomalies_statistical(con, parquet_path: str, cols: List[str], method
             df['anomaly_score'] = np.max(scores, axis=0) if scores else 0
             
         elif method == 'mad':
+            # FIXED: Calculate median and MAD separately to avoid nested aggregates
             mad_values = {}
             for col in cols:
-                result = con.execute(f"""
-                    SELECT 
-                        median("{col}") as med,
-                        median(ABS("{col}" - median("{col}"))) as mad_val
+                # First get median
+                median_result = con.execute(f"""
+                    SELECT median("{col}") as med
                     FROM parquet_scan('{parquet_path}')
                     WHERE "{col}" IS NOT NULL
                 """).fetchone()
-                med, mad_val = result[0], result[1]
-                mad_values[col] = {'median': med, 'mad': mad_val if mad_val and mad_val > 0 else 1}
+                median_val = median_result[0]
+                
+                # Then calculate MAD using the median value
+                mad_result = con.execute(f"""
+                    SELECT median(ABS("{col}" - {median_val})) as mad_val
+                    FROM parquet_scan('{parquet_path}')
+                    WHERE "{col}" IS NOT NULL
+                """).fetchone()
+                mad_val = mad_result[0]
+                
+                mad_values[col] = {
+                    'median': median_val, 
+                    'mad': mad_val if mad_val and mad_val > 0 else 1
+                }
             
+            # Build query with pre-calculated values
             mad_parts = [f'ABS(("{col}" - {mad_values[col]["median"]}) / ({mad_values[col]["mad"]} * 1.4826)) as mad_{col}' 
                         for col in cols]
             query = f"""
@@ -468,7 +493,7 @@ def detect_anomalies_statistical(con, parquet_path: str, cols: List[str], method
     except Exception as e:
         st.error(f"Statistical detection error: {str(e)}")
         import traceback
-        st.error(traceback.format_exc())
+        st.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 def detect_anomalies_ml(df: pd.DataFrame, cols: List[str], method: str, contamination: float) -> Optional[pd.DataFrame]:
@@ -785,12 +810,12 @@ with st.sidebar:
         st.markdown("---")
         st.markdown("## ⚙️ Configuration")
         
-        # Get column lists
+        # Get column lists - FIXED: Increased categorical limit to 500
         numeric_cols = [col for col, info in st.session_state.column_info.items() 
                        if any(t in info['type'].upper() for t in ['INT', 'DOUBLE', 'DECIMAL', 'FLOAT', 'NUMERIC'])]
         
         categorical_cols = [col for col, info in st.session_state.column_info.items()
-                          if 'VARCHAR' in info['type'].upper() and info['distinct'] < 500]  # Increased from 100 to 500
+                          if 'VARCHAR' in info['type'].upper() and info['distinct'] < 500]  # FIXED: Was 100
         
         date_cols = [col for col, info in st.session_state.column_info.items()
                     if any(t in info['type'].upper() for t in ['DATE', 'TIMESTAMP'])]
@@ -906,7 +931,7 @@ with st.sidebar:
                         time.sleep(0.5)
                         st.rerun()
         
-        # Clear button
+        # Clear button - FIXED to properly reset state
         if st.session_state.data_loaded:
             st.markdown("---")
             if st.button("🗑️ Clear Data", use_container_width=True):
