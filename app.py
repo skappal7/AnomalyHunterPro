@@ -38,7 +38,7 @@ from reportlab.lib.units import inch
 # =============================================================================
 
 st.set_page_config(
-    page_title="Anomaly Hunter Pro 🎯",
+    page_title="Anomaly Detection Pro 🎯",
     layout="wide",
     page_icon="🎯",
     initial_sidebar_state="expanded"
