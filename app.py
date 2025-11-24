@@ -543,7 +543,7 @@ def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, met
         st.error(f"Error in statistical detection: {e}")
         return None
 
-def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, contamination: float = 0.1) -> pd.DataFrame | None:
+def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, contamination: float = 0.1) -> tuple[pd.DataFrame | None, dict]:
     """ML-based anomaly detection using score-based thresholding instead of hard contamination constraint
     
     KEY IMPROVEMENT: contamination is now a GUIDE, not a hard constraint. The algorithm:
@@ -624,22 +624,20 @@ def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, conta
         df_clean['anomaly'] = (normalized_scores > adaptive_threshold).astype(int)
         df_clean['anomaly_score'] = normalized_scores
         
-        # Add metadata for transparency
-        actual_anomaly_rate = df_clean['anomaly'].sum() / len(df_clean)
+        # Store detection metadata in session state (df.attrs breaks parquet export)
         expected_count = int(len(df_clean) * contamination)
         actual_count = df_clean['anomaly'].sum()
         
-        # Store detection metadata
-        df_clean.attrs['expected_anomalies'] = expected_count
-        df_clean.attrs['actual_anomalies'] = actual_count
-        df_clean.attrs['threshold_used'] = adaptive_threshold
-        
-        return df_clean
+        return df_clean, {
+            'expected_anomalies': expected_count,
+            'actual_anomalies': actual_count,
+            'threshold_used': adaptive_threshold
+        }
     except Exception as e:
         st.error(f"Error in ML detection: {e}")
         import traceback
         st.error(traceback.format_exc())
-        return None
+        return None, {}
 
 # =============================================================================
 # INSIGHTS & VISUALIZATIONS
@@ -660,10 +658,11 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
             'categorical_insights': {}
         }
         
-        # Add detection metadata if available
-        if hasattr(df, 'attrs'):
-            insights['expected_anomalies'] = df.attrs.get('expected_anomalies', None)
-            insights['threshold_used'] = df.attrs.get('threshold_used', None)
+        # Add detection metadata from session state if available
+        if 'detection_metadata' in st.session_state:
+            metadata = st.session_state.detection_metadata
+            insights['expected_anomalies'] = metadata.get('expected_anomalies', None)
+            insights['threshold_used'] = metadata.get('threshold_used', None)
         
         # Category-level analysis
         if categorical_cols:
@@ -1438,9 +1437,12 @@ with tab2:
                             else:
                                 df = get_sample_data(con, st.session_state.parquet_path, st.session_state.row_count)
                             
-                            results_df = detect_anomalies_ml(df, numeric_cols, detection_method, contamination)
+                            results_df, detection_metadata = detect_anomalies_ml(df, numeric_cols, detection_method, contamination)
+                            # Store metadata in session state
+                            st.session_state.detection_metadata = detection_metadata
                         else:
                             results_df = detect_anomalies_statistical(con, st.session_state.parquet_path, numeric_cols, detection_method, threshold if detection_method == 'zscore' else 3)
+                            st.session_state.detection_metadata = {}
                         
                         if results_df is not None:
                             st.session_state.results_df = results_df
