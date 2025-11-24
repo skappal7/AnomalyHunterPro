@@ -955,7 +955,7 @@ def generate_pdf_report(insights: dict, categorical_cols: list, numeric_cols: li
         elements = []
         
         # Title
-        elements.append(Paragraph("🎯 Anomaly Hunter Pro - Analysis Report", title_style))
+        elements.append(Paragraph("🎯 Anomaly Detection Pro - Analysis Report", title_style))
         elements.append(Spacer(1, 20))
         
         # Executive Summary
@@ -1038,7 +1038,7 @@ col1, col2 = st.columns([2, 1])
 with col1:
     st.markdown("""
     <div class="main-header">
-        <h1>🎯 Anomaly Hunter Pro</h1>
+        <h1>🎯 Anomaly Detection Pro</h1>
         <p>Enterprise-Grade Anomaly Detection Platform</p>
     </div>
     """, unsafe_allow_html=True)
@@ -1651,7 +1651,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Hunter Pro</b> | Developed by CE Innovations Team 2025<br>
+        🎯 <b>Anomaly Detection Pro</b> | Developed by CE Innovations Team 2025<br>
         Powered by DuckDB • PyArrow • Scikit-learn • Plotly | A Run Better Initiative
     </p>
 </div>
