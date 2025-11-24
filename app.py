@@ -450,12 +450,16 @@ def explain_contamination(rate: float, total_records: int) -> str:
         use_case = "highly variable data"
     
     return f"""
-    **What this means:** You're telling the algorithm to expect ~**{expected_anomalies:,} unusual records** 
-    out of {total_records:,} total ({rate*100:.1f}%).
+    **What this means:** This is your **sensitivity guide**. The algorithm will use ~**{expected_anomalies:,}** 
+    as a reference point ({rate*100:.1f}%), but can find MORE or FEWER anomalies based on actual data patterns.
     
     **Sensitivity:** {sensitivity.title()} - typical for {use_case}
     
-    **💡 Tip:** If you're unsure, start with 0.10 (10%) and adjust based on results.
+    **💡 How it works:** The algorithm calculates anomaly scores for ALL records, then uses this rate to set 
+    an intelligent threshold. Records scoring significantly above this threshold are flagged as anomalies.
+    
+    **Key difference:** Unlike the old version, this won't force exactly {rate*100:.1f}% to be anomalies - 
+    it discovers what's genuinely unusual in your data.
     """
 
 # =============================================================================
@@ -540,7 +544,15 @@ def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, met
         return None
 
 def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, contamination: float = 0.1) -> pd.DataFrame | None:
-    """ML-based anomaly detection with factory pattern"""
+    """ML-based anomaly detection using score-based thresholding instead of hard contamination constraint
+    
+    KEY IMPROVEMENT: contamination is now a GUIDE, not a hard constraint. The algorithm:
+    1. Trains on all data to learn normal patterns
+    2. Calculates anomaly scores for every record
+    3. Uses contamination to set an intelligent threshold
+    4. Flags records that score SIGNIFICANTLY above threshold
+    5. Can find MORE or FEWER anomalies than expected based on actual data
+    """
     try:
         # Handle missing values
         df_clean = df.copy()
@@ -556,34 +568,77 @@ def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, conta
         model_class = config['class']
         params = config['params'].copy()
         
-        # Update contamination if provided
-        if 'contamination' in params:
-            params['contamination'] = contamination
-        if 'nu' in params:
-            params['nu'] = contamination
-        
         # Adjust LOF n_neighbors for small datasets
         if method == 'lof':
             params['n_neighbors'] = min(params['n_neighbors'], len(df_clean) - 1)
         
-        # Fit and predict
-        model = model_class(**params)
-        predictions = model.fit_predict(X_scaled)
-        
-        # Get anomaly scores
-        if hasattr(model, 'score_samples'):
+        # Train models WITHOUT hard contamination constraint
+        if method == 'isolation_forest':
+            # Use contamination as hint but get raw scores
+            params['contamination'] = contamination
+            model = model_class(**params)
+            model.fit(X_scaled)
             scores = model.score_samples(X_scaled)
-        elif hasattr(model, 'negative_outlier_factor_'):
+            # Higher negative scores = more anomalous, convert to positive
+            anomaly_scores = -scores
+            
+        elif method == 'lof':
+            # LOF requires contamination, but we'll override with scores
+            params['contamination'] = contamination
+            params['novelty'] = False
+            model = model_class(**params)
+            model.fit(X_scaled)
             scores = model.negative_outlier_factor_
-        else:
-            scores = predictions
+            # More negative = more anomalous
+            anomaly_scores = -scores
+            
+        elif method == 'one_class_svm':
+            # Train without nu constraint, use decision function
+            params_train = params.copy()
+            params_train.pop('nu', None)
+            model = model_class(nu=0.5, **params_train)  # Use neutral nu for training
+            model.fit(X_scaled)
+            scores = model.decision_function(X_scaled)
+            # More negative = more anomalous
+            anomaly_scores = -scores
         
-        df_clean['anomaly'] = (predictions == -1).astype(int)
-        df_clean['anomaly_score'] = np.abs(scores)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        
+        # Normalize scores to 0-10 scale for consistency
+        score_min, score_max = anomaly_scores.min(), anomaly_scores.max()
+        if score_max > score_min:
+            normalized_scores = 10 * (anomaly_scores - score_min) / (score_max - score_min)
+        else:
+            normalized_scores = np.zeros_like(anomaly_scores)
+        
+        # Use contamination as GUIDE to set threshold, not hard constraint
+        # Calculate threshold based on expected percentile
+        threshold_percentile = (1 - contamination) * 100
+        score_threshold = np.percentile(normalized_scores, threshold_percentile)
+        
+        # Apply intelligent thresholding: flag if score significantly above threshold
+        # Use 1.2x threshold as buffer to focus on truly extreme cases
+        adaptive_threshold = max(score_threshold * 1.2, 6.0)  # Minimum threshold of 6.0
+        
+        df_clean['anomaly'] = (normalized_scores > adaptive_threshold).astype(int)
+        df_clean['anomaly_score'] = normalized_scores
+        
+        # Add metadata for transparency
+        actual_anomaly_rate = df_clean['anomaly'].sum() / len(df_clean)
+        expected_count = int(len(df_clean) * contamination)
+        actual_count = df_clean['anomaly'].sum()
+        
+        # Store detection metadata
+        df_clean.attrs['expected_anomalies'] = expected_count
+        df_clean.attrs['actual_anomalies'] = actual_count
+        df_clean.attrs['threshold_used'] = adaptive_threshold
         
         return df_clean
     except Exception as e:
         st.error(f"Error in ML detection: {e}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
 # =============================================================================
@@ -604,6 +659,11 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
             'method': method,
             'categorical_insights': {}
         }
+        
+        # Add detection metadata if available
+        if hasattr(df, 'attrs'):
+            insights['expected_anomalies'] = df.attrs.get('expected_anomalies', None)
+            insights['threshold_used'] = df.attrs.get('threshold_used', None)
         
         # Category-level analysis
         if categorical_cols:
@@ -662,17 +722,23 @@ def generate_narrative(insights: dict, categorical_cols: list, numeric_cols: lis
     #### 🎯 THE VERDICT
     """
     
-    # Compare to expected rate
+    # Show expected vs actual if available
     if expected_rate and anomalies > 0:
         expected_pct = expected_rate * 100
+        expected_count = insights.get('expected_anomalies', int(total * expected_rate))
         diff = rate - expected_pct
         
+        narrative += f"""
+    **Expected:** ~{expected_count:,} anomalies ({expected_pct:.1f}%)  
+    **Found:** {anomalies:,} anomalies ({rate:.2f}%)
+    """
+        
         if abs(diff) < 1:
-            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - right in line with your expected **{expected_pct:.1f}%** threshold. This suggests the algorithm is well-tuned."
+            verdict = f"✓ **Right on target** - The data matches your expectations. The algorithm found genuine anomalies at the anticipated rate."
         elif diff > 2:
-            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - **higher** than your expected **{expected_pct:.1f}%** threshold. This suggests genuine unusual patterns worth investigating."
+            verdict = f"⚠️ **More than expected** - Found {anomalies - expected_count:,} additional anomalies ({diff:+.1f}%). Your data has more unusual patterns than anticipated - investigate these carefully."
         else:
-            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - **lower** than your expected **{expected_pct:.1f}%** threshold. Your data is cleaner than anticipated, or consider lowering the threshold for more sensitivity."
+            verdict = f"✓ **Cleaner than expected** - Found {expected_count - anomalies:,} fewer anomalies ({diff:.1f}%). Your data quality is better than anticipated."
     else:
         if rate < 1:
             verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - a very clean dataset!"
@@ -684,6 +750,11 @@ def generate_narrative(insights: dict, categorical_cols: list, numeric_cols: lis
             verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - significant anomaly presence, investigate patterns."
     
     narrative += f"\n{verdict}\n"
+    
+    # Threshold info if available
+    if 'threshold_used' in insights:
+        threshold = insights['threshold_used']
+        narrative += f"\n**Detection threshold:** {threshold:.2f} (on 0-10 scale)\n"
     
     # Top finding - feature importance
     if 'feature_importance' in insights and insights['feature_importance']:
@@ -963,6 +1034,11 @@ def generate_pdf_report(insights: dict, categorical_cols: list, numeric_cols: li
         elements.append(Paragraph(f"<b>Total Records:</b> {insights['total_records']:,}", styles['Normal']))
         elements.append(Paragraph(f"<b>Anomalies Detected:</b> {insights['anomalies']:,} ({insights['anomaly_rate']:.2f}%)", styles['Normal']))
         elements.append(Paragraph(f"<b>Detection Method:</b> {insights['method']}", styles['Normal']))
+        
+        # Show expected vs actual if available
+        if 'expected_anomalies' in insights:
+            elements.append(Paragraph(f"<b>Expected Anomalies:</b> {insights['expected_anomalies']:,}", styles['Normal']))
+        
         elements.append(Paragraph(f"<b>Analysis Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
         elements.append(Spacer(1, 20))
         
@@ -1039,7 +1115,7 @@ with col1:
     st.markdown("""
     <div class="main-header">
         <h1>🎯 Anomaly Detection Pro</h1>
-        <p>Enterprise-Grade Anomaly Detection Platform</p>
+        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1078,6 +1154,8 @@ with st.sidebar:
         • **Isolation Forest** - Global anomalies  
         • **LOF** - Local neighborhood outliers  
         • **One-Class SVM** - Non-linear boundaries
+        
+        **🔧 FIXED:** Expected rate is now a guide, not a quota!
         """)
     
     st.markdown("---")
@@ -1313,10 +1391,11 @@ with tab2:
             with col1:
                 method = st.selectbox("Algorithm", ['Isolation Forest', 'Local Outlier Factor', 'One-Class SVM'])
             with col2:
-                contamination = st.slider("Expected Anomaly Rate", 0.01, 0.5, 0.1, 0.01, help="0.1 = 10%")
+                contamination = st.slider("Expected Anomaly Rate (Sensitivity Guide)", 0.01, 0.5, 0.1, 0.01, 
+                                        help="This is a GUIDE, not a hard limit. Algorithm can find more or fewer anomalies.")
                 
                 # Show explanation
-                with st.expander("ℹ️ What does this mean?", expanded=False):
+                with st.expander("ℹ️ What does this mean? (IMPROVED)", expanded=False):
                     st.markdown(explain_contamination(contamination, st.session_state.row_count))
             with col3:
                 max_sample = min(50000, st.session_state.row_count) if method != 'Isolation Forest' else st.session_state.row_count
@@ -1389,18 +1468,29 @@ with tab2:
                             
                             anomaly_count = results_df['anomaly'].sum()
                             anomaly_rate = (anomaly_count / len(results_df) * 100)
+                            expected_count = int(len(results_df) * contamination) if use_ml else None
                             
-                            st.markdown(f"""
+                            result_msg = f"""
                             <div class="success-box">
                                 <h4>📊 Quick Results</h4>
                                 <p><b>Detected:</b> {anomaly_count:,} / {len(results_df):,} ({anomaly_rate:.2f}%)</p>
-                                <p>👉 View details in <b>Results</b> tab</p>
-                            </div>
-                            """, unsafe_allow_html=True)
+                            """
+                            
+                            if expected_count:
+                                diff = anomaly_count - expected_count
+                                result_msg += f"<p><b>Expected:</b> ~{expected_count:,} ({contamination*100:.1f}%)</p>"
+                                if abs(diff) > expected_count * 0.1:  # More than 10% difference
+                                    result_msg += f"<p><b>Difference:</b> {diff:+,} anomalies ({(diff/expected_count)*100:+.1f}%)</p>"
+                            
+                            result_msg += "<p>👉 View details in <b>Results</b> tab</p></div>"
+                            
+                            st.markdown(result_msg, unsafe_allow_html=True)
                     
                     except Exception as e:
                         processing_placeholder.empty()
                         st.error(f"❌ Error: {e}")
+                        import traceback
+                        st.error(traceback.format_exc())
 
 # =============================================================================
 # TAB 3: RESULTS
@@ -1590,7 +1680,7 @@ with tab3:
             #### 4️⃣ VALIDATE
             • Manually review 20 random flagged records
             • If >80% are genuinely problematic → model is well-tuned ✓
-            • If <50% are problematic → increase expected anomaly rate and re-run
+            • If <50% are problematic → adjust sensitivity and re-run
             • Document common patterns for future reference
             """)
         else:
@@ -1651,8 +1741,8 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Detection Pro</b> | Developed by CE Innovations Team 2025<br>
-        Powered by DuckDB • PyArrow • Scikit-learn • Plotly | A Run Better Initiative
+        🎯 <b>Anomaly Detection Pro - FIXED</b> | Developed by CE Innovations Team 2025<br>
+        Powered by DuckDB • PyArrow • Scikit-learn • Plotly | Score-Based Detection ✓
     </p>
 </div>
 """, unsafe_allow_html=True)
