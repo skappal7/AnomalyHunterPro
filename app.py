@@ -504,24 +504,16 @@ def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, met
             df['anomaly'] = (df['max_zscore'] > threshold).astype(int)
             df['anomaly_score'] = df['max_zscore']
             
-            # Calculate probability for statistical methods (percentile-based)
-            from scipy.stats import percentileofscore
-            df['anomaly_probability'] = df['anomaly_score'].apply(
-                lambda x: percentileofscore(df['anomaly_score'].values, x, kind='rank')
+            # Calculate probability - VECTORIZED
+            df['anomaly_probability'] = (df['anomaly_score'].rank(pct=True) * 100).round(2)
+            
+            # Assign risk tiers - VECTORIZED
+            df['risk_tier'] = pd.cut(
+                df['anomaly_probability'],
+                bins=[0, 50, 70, 90, 100],
+                labels=['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'],
+                include_lowest=True
             )
-            
-            # Assign risk tiers
-            def assign_risk_tier(prob):
-                if prob >= 90:
-                    return 'CRITICAL'
-                elif prob >= 70:
-                    return 'HIGH'
-                elif prob >= 50:
-                    return 'MEDIUM'
-                else:
-                    return 'LOW'
-            
-            df['risk_tier'] = df['anomaly_probability'].apply(assign_risk_tier)
             
             tier_stats = df['risk_tier'].value_counts().to_dict()
             
@@ -566,24 +558,16 @@ def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, met
             
             df['anomaly_score'] = np.max(scores, axis=0)
             
-            # Calculate probability for IQR method
-            from scipy.stats import percentileofscore
-            df['anomaly_probability'] = df['anomaly_score'].apply(
-                lambda x: percentileofscore(df['anomaly_score'].values, x, kind='rank')
+            # Calculate probability - VECTORIZED
+            df['anomaly_probability'] = (df['anomaly_score'].rank(pct=True) * 100).round(2)
+            
+            # Assign risk tiers - VECTORIZED
+            df['risk_tier'] = pd.cut(
+                df['anomaly_probability'],
+                bins=[0, 50, 70, 90, 100],
+                labels=['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'],
+                include_lowest=True
             )
-            
-            # Assign risk tiers
-            def assign_risk_tier(prob):
-                if prob >= 90:
-                    return 'CRITICAL'
-                elif prob >= 70:
-                    return 'HIGH'
-                elif prob >= 50:
-                    return 'MEDIUM'
-                else:
-                    return 'LOW'
-            
-            df['risk_tier'] = df['anomaly_probability'].apply(assign_risk_tier)
             
             tier_stats = df['risk_tier'].value_counts().to_dict()
             
@@ -680,25 +664,17 @@ def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, conta
         df_clean['anomaly'] = (normalized_scores > adaptive_threshold).astype(int)
         df_clean['anomaly_score'] = normalized_scores
         
-        # Calculate anomaly probability based on percentile rank (0-100%)
-        # Higher score = higher percentile = higher probability
-        from scipy.stats import percentileofscore
-        df_clean['anomaly_probability'] = df_clean['anomaly_score'].apply(
-            lambda x: percentileofscore(normalized_scores, x, kind='rank')
+        # Calculate anomaly probability based on percentile rank (0-100%) - VECTORIZED
+        # Use rank() which is much faster than percentileofscore for entire arrays
+        df_clean['anomaly_probability'] = (df_clean['anomaly_score'].rank(pct=True) * 100).round(2)
+        
+        # Assign risk tiers based on probability - VECTORIZED
+        df_clean['risk_tier'] = pd.cut(
+            df_clean['anomaly_probability'],
+            bins=[0, 50, 70, 90, 100],
+            labels=['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'],
+            include_lowest=True
         )
-        
-        # Assign risk tiers based on probability
-        def assign_risk_tier(prob):
-            if prob >= 90:
-                return 'CRITICAL'
-            elif prob >= 70:
-                return 'HIGH'
-            elif prob >= 50:
-                return 'MEDIUM'
-            else:
-                return 'LOW'
-        
-        df_clean['risk_tier'] = df_clean['anomaly_probability'].apply(assign_risk_tier)
         
         # Store detection metadata in session state (df.attrs breaks parquet export)
         expected_count = int(len(df_clean) * contamination)
@@ -1334,7 +1310,7 @@ with col1:
     st.markdown("""
     <div class="main-header">
         <h1>🎯 Anomaly Detection Pro</h1>
-        <p>Enterprise-Grade Anomaly Detection Platform - Version 1.0 </p>
+        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1374,7 +1350,7 @@ with st.sidebar:
         • **LOF** - Local neighborhood outliers  
         • **One-Class SVM** - Non-linear boundaries
         
-        **🔧 Improved:** Expected rate is now a guide, not a quota!
+        **🔧 FIXED:** Expected rate is now a guide, not a quota!
         """)
     
     st.markdown("---")
@@ -2055,7 +2031,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Detection Pro Version 1.0</b> | Developed by CE Innovations Team 2025<br>
+        🎯 <b>Anomaly Detection Pro - FIXED</b> | Developed by CE Innovations Team 2025<br>
         Powered by DuckDB • PyArrow • Scikit-learn • Plotly | Score-Based Detection ✓
     </p>
 </div>
