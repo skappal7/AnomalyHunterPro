@@ -504,10 +504,24 @@ def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, met
             df['anomaly'] = (df['max_zscore'] > threshold).astype(int)
             df['anomaly_score'] = df['max_zscore']
             
+            # Calculate probability - VECTORIZED
+            df['anomaly_probability'] = (df['anomaly_score'].rank(pct=True) * 100).round(2)
+            
+            # Assign risk tiers - VECTORIZED
+            df['risk_tier'] = pd.cut(
+                df['anomaly_probability'],
+                bins=[0, 50, 70, 90, 100],
+                labels=['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'],
+                include_lowest=True
+            )
+            
+            tier_stats = df['risk_tier'].value_counts().to_dict()
+            
             metadata = {
                 'method': 'zscore',
                 'threshold_value': threshold,
-                'threshold_display': f"{threshold:.1f}σ (standard deviations)"
+                'threshold_display': f"{threshold:.1f}σ (standard deviations)",
+                'tier_stats': tier_stats
             }
             
         else:  # IQR method
@@ -544,10 +558,24 @@ def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, met
             
             df['anomaly_score'] = np.max(scores, axis=0)
             
+            # Calculate probability - VECTORIZED
+            df['anomaly_probability'] = (df['anomaly_score'].rank(pct=True) * 100).round(2)
+            
+            # Assign risk tiers - VECTORIZED
+            df['risk_tier'] = pd.cut(
+                df['anomaly_probability'],
+                bins=[0, 50, 70, 90, 100],
+                labels=['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'],
+                include_lowest=True
+            )
+            
+            tier_stats = df['risk_tier'].value_counts().to_dict()
+            
             metadata = {
                 'method': 'iqr',
                 'threshold_value': 1.5,
-                'threshold_display': "1.5×IQR range"
+                'threshold_display': "1.5×IQR range",
+                'tier_stats': tier_stats
             }
         
         return df, metadata
@@ -636,16 +664,32 @@ def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, conta
         df_clean['anomaly'] = (normalized_scores > adaptive_threshold).astype(int)
         df_clean['anomaly_score'] = normalized_scores
         
+        # Calculate anomaly probability based on percentile rank (0-100%) - VECTORIZED
+        # Use rank() which is much faster than percentileofscore for entire arrays
+        df_clean['anomaly_probability'] = (df_clean['anomaly_score'].rank(pct=True) * 100).round(2)
+        
+        # Assign risk tiers based on probability - VECTORIZED
+        df_clean['risk_tier'] = pd.cut(
+            df_clean['anomaly_probability'],
+            bins=[0, 50, 70, 90, 100],
+            labels=['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'],
+            include_lowest=True
+        )
+        
         # Store detection metadata in session state (df.attrs breaks parquet export)
         expected_count = int(len(df_clean) * contamination)
         actual_count = df_clean['anomaly'].sum()
+        
+        # Calculate tier statistics
+        tier_stats = df_clean['risk_tier'].value_counts().to_dict()
         
         return df_clean, {
             'method': 'ml',
             'expected_anomalies': expected_count,
             'actual_anomalies': actual_count,
             'threshold_value': adaptive_threshold,
-            'threshold_display': f"{adaptive_threshold:.2f} (0-10 scale)"
+            'threshold_display': f"{adaptive_threshold:.2f} (0-10 scale)",
+            'tier_stats': tier_stats
         }
     except Exception as e:
         st.error(f"Error in ML detection: {e}")
@@ -802,8 +846,10 @@ def generate_visual_summary(insights: dict, categorical_cols: list, numeric_cols
         # Interpretation
         if ratio > 2:
             st.error(f"⚠️ **Critical:** Anomalies are {ratio:.1f}x higher than normal. This is your #1 investigation priority.")
-        elif ratio < 0.5:
+        elif ratio > 0 and ratio < 0.5:
             st.error(f"⚠️ **Critical:** Anomalies are {(1/ratio):.1f}x lower than normal. Investigate unusual drops.")
+        elif ratio == 0:
+            st.error(f"⚠️ **Critical:** Anomalies have zero average for this metric. Investigate missing/null values.")
         else:
             st.warning(f"⚠️ **Notable:** Anomalies differ by {abs(ratio-1)*100:.0f}% from normal baseline.")
         
@@ -890,6 +936,50 @@ def generate_visual_summary(insights: dict, categorical_cols: list, numeric_cols
                 </ul>
             </div>
             """, unsafe_allow_html=True)
+        
+        # Add smart audit recommendations if tier stats available
+        if 'detection_metadata' in st.session_state and 'tier_stats' in st.session_state.detection_metadata:
+            tier_stats = st.session_state.detection_metadata['tier_stats']
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("### 📋 SMART AUDIT PLAN")
+            
+            critical_count = tier_stats.get('CRITICAL', 0)
+            high_count = tier_stats.get('HIGH', 0)
+            medium_count = tier_stats.get('MEDIUM', 0)
+            
+            # Calculate recommended audit counts
+            critical_audit = critical_count  # Audit ALL critical
+            high_audit = int(high_count * 0.5)  # Sample 50% of high
+            medium_audit = int(medium_count * 0.2)  # Sample 20% of medium
+            total_recommended = critical_audit + high_audit + medium_audit
+            
+            st.markdown(f"""
+            <div style='background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); 
+                        padding: 1.5rem; border-radius: 12px; color: white;
+                        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);'>
+                <h4 style='margin: 0 0 1rem 0; color: white;'>🎯 Recommended Audit Volume: {total_recommended:,} records</h4>
+                <div style='display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;'>
+                    <div>
+                        <div style='font-size: 0.875rem; opacity: 0.9;'>CRITICAL Tier</div>
+                        <div style='font-size: 1.5rem; font-weight: 700;'>{critical_audit:,} / {critical_count:,}</div>
+                        <div style='font-size: 0.75rem; opacity: 0.8;'>Audit 100%</div>
+                    </div>
+                    <div>
+                        <div style='font-size: 0.875rem; opacity: 0.9;'>HIGH Tier</div>
+                        <div style='font-size: 1.5rem; font-weight: 700;'>{high_audit:,} / {high_count:,}</div>
+                        <div style='font-size: 0.75rem; opacity: 0.8;'>Sample 50%</div>
+                    </div>
+                    <div>
+                        <div style='font-size: 0.875rem; opacity: 0.9;'>MEDIUM Tier</div>
+                        <div style='font-size: 1.5rem; font-weight: 700;'>{medium_audit:,} / {medium_count:,}</div>
+                        <div style='font-size: 0.75rem; opacity: 0.8;'>Sample 20%</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.caption("💡 Use risk tier filter below to export specific lists for your audit team")
 
 def create_metric_card(label: str, value: str | int) -> str:
     """Generate HTML for metric card"""
@@ -1222,7 +1312,7 @@ with col1:
     st.markdown("""
     <div class="main-header">
         <h1>🎯 Anomaly Detection Pro</h1>
-        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
+        <p>Enterprise-Grade Anomaly Detection Platform</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1262,7 +1352,7 @@ with st.sidebar:
         • **LOF** - Local neighborhood outliers  
         • **One-Class SVM** - Non-linear boundaries
         
-        **🔧 FIXED:** Expected rate is now a guide, not a quota!
+        **🔧 NEW:** Expected rate is now a guide, not a quota!
         """)
     
     st.markdown("---")
@@ -1640,6 +1730,55 @@ with tab3:
         
         st.markdown("<br>", unsafe_allow_html=True)
         
+        # Risk Tier Distribution (NEW)
+        if 'risk_tier' in df_results.columns:
+            st.markdown("### 🎯 RISK TIER BREAKDOWN")
+            
+            tier_counts = df_results['risk_tier'].value_counts()
+            tier_order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
+            tier_colors = {'CRITICAL': '#dc2626', 'HIGH': '#f59e0b', 'MEDIUM': '#3b82f6', 'LOW': '#10b981'}
+            
+            # Create 4-column layout for tier cards
+            cols = st.columns(4)
+            
+            for idx, tier in enumerate(tier_order):
+                count = tier_counts.get(tier, 0)
+                pct = (count / len(df_results) * 100) if len(df_results) > 0 else 0
+                color = tier_colors[tier]
+                
+                with cols[idx]:
+                    st.markdown(f"""
+                    <div style='background: white; border: 3px solid {color}; padding: 1rem; 
+                                border-radius: 10px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1);'>
+                        <div style='color: {color}; font-size: 0.75rem; font-weight: 700; 
+                                    text-transform: uppercase; letter-spacing: 0.05em;'>{tier}</div>
+                        <div style='font-size: 2rem; font-weight: 700; color: #1e293b; margin: 0.5rem 0;'>{count:,}</div>
+                        <div style='color: #64748b; font-size: 0.875rem;'>{pct:.1f}%</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # Probability distribution chart
+            fig_prob = px.histogram(
+                df_results, 
+                x='anomaly_probability',
+                nbins=50,
+                title="Anomaly Probability Distribution",
+                labels={'anomaly_probability': 'Anomaly Probability (%)', 'count': 'Number of Records'},
+                color_discrete_sequence=['#6366f1']
+            )
+            
+            # Add vertical lines for tier boundaries
+            fig_prob.add_vline(x=90, line_dash="dash", line_color="red", annotation_text="Critical (90%)")
+            fig_prob.add_vline(x=70, line_dash="dash", line_color="orange", annotation_text="High (70%)")
+            fig_prob.add_vline(x=50, line_dash="dash", line_color="blue", annotation_text="Medium (50%)")
+            
+            fig_prob.update_layout(template="plotly_white", height=400)
+            st.plotly_chart(fig_prob, use_container_width=True)
+            
+            st.markdown("---")
+        
         # Executive visual summary with professional styling
         expected_rate = st.session_state.get('contamination_rate', None)
         generate_visual_summary(insights, categorical_cols, numeric_cols, expected_rate)
@@ -1738,9 +1877,56 @@ with tab3:
                                 highest = cat_data['highest_rate']
                                 st.info(f"🥇 Highest: **{highest[cat_col]}** at **{highest['anomaly_rate']:.2f}%**")
         
-        # Full results
-        with st.expander("📋 Full Results Table"):
-            st.dataframe(df_results, use_container_width=True, height=400)
+        # Full results with filters
+        st.markdown("### 📋 DETAILED RESULTS")
+        
+        # Add filters if risk tier column exists
+        if 'risk_tier' in df_results.columns:
+            col1, col2, col3 = st.columns([2, 2, 1])
+            
+            with col1:
+                tier_filter = st.multiselect(
+                    "Filter by Risk Tier",
+                    options=['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'],
+                    default=['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'],
+                    help="Select tiers to display"
+                )
+            
+            with col2:
+                prob_range = st.slider(
+                    "Anomaly Probability Range (%)",
+                    0, 100, (0, 100),
+                    help="Filter by probability percentage"
+                )
+            
+            with col3:
+                st.markdown("<br>", unsafe_allow_html=True)
+                anomaly_only = st.checkbox("Anomalies Only", value=True)
+            
+            # Apply filters
+            filtered_df = df_results.copy()
+            
+            if tier_filter:
+                filtered_df = filtered_df[filtered_df['risk_tier'].isin(tier_filter)]
+            
+            filtered_df = filtered_df[
+                (filtered_df['anomaly_probability'] >= prob_range[0]) & 
+                (filtered_df['anomaly_probability'] <= prob_range[1])
+            ]
+            
+            if anomaly_only:
+                filtered_df = filtered_df[filtered_df['anomaly'] == 1]
+            
+            st.info(f"📊 Showing {len(filtered_df):,} of {len(df_results):,} records")
+            
+            # Sort by probability descending for better UX
+            filtered_df = filtered_df.sort_values('anomaly_probability', ascending=False)
+            
+            st.dataframe(filtered_df, use_container_width=True, height=400)
+        else:
+            # No filters, show all
+            with st.expander("📋 Full Results Table"):
+                st.dataframe(df_results, use_container_width=True, height=400)
         
         st.markdown("---")
         
@@ -1847,7 +2033,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Detection Pro - FIXED</b> | Developed by CE Innovations Team 2025<br>
+        🎯 <b>Anomaly Detection Pro</b> | Developed by CE Innovations Team 2025<br>
         Powered by DuckDB • PyArrow • Scikit-learn • Plotly | Score-Based Detection ✓
     </p>
 </div>
