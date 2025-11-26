@@ -821,6 +821,195 @@ def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, conta
 # INSIGHTS & VISUALIZATIONS
 # =============================================================================
 
+def apply_intelligent_filtering(df: pd.DataFrame, numeric_cols: list, categorical_cols: list = None, date_col: str = None) -> tuple[pd.DataFrame, dict]:
+    """Apply intelligent multi-stage filtering to identify high-priority audit targets
+    
+    Stages:
+    1. Frequency Analysis - agents with multiple critical days
+    2. Severity Analysis - top percentile of anomaly scores
+    3. Multi-Metric Consensus - anomalous in 2+ KPIs
+    4. Categorization into actionable tiers
+    
+    Returns: (filtered_df, filtering_stats)
+    """
+    
+    if 'anomaly' not in df.columns or df['anomaly'].sum() == 0:
+        return df, {'stages': [], 'total_filtered': 0}
+    
+    # Detect agent column
+    agent_col = None
+    for col in df.columns:
+        if any(keyword in col.lower() for keyword in ['agent', 'rep', 'employee', 'user']):
+            agent_col = col
+            break
+    
+    if not agent_col:
+        # No agent column, return original
+        return df, {'stages': [], 'total_filtered': 0, 'note': 'No agent column detected'}
+    
+    filtering_stats = {
+        'stages': [],
+        'agent_column': agent_col,
+        'date_column': date_col
+    }
+    
+    # Initial count
+    initial_anomalies = df[df['anomaly'] == 1]
+    initial_count = len(initial_anomalies)
+    initial_agents = initial_anomalies[agent_col].nunique()
+    
+    filtering_stats['initial_anomalies'] = initial_count
+    filtering_stats['initial_agents'] = initial_agents
+    
+    # === STAGE 1: FREQUENCY ANALYSIS ===
+    # Count critical days per agent (only for records with high probability)
+    if 'anomaly_probability' in df.columns and 'risk_tier' in df.columns:
+        critical_df = df[(df['risk_tier'] == 'CRITICAL') | (df['risk_tier'] == 'HIGH')]
+        
+        if len(critical_df) > 0:
+            agent_frequency = critical_df.groupby(agent_col).size().reset_index(name='critical_day_count')
+            
+            # Filter: agents with 3+ critical days (configurable threshold)
+            frequency_threshold = 3 if date_col else 1  # Only apply if we have dates
+            high_freq_agents = agent_frequency[agent_frequency['critical_day_count'] >= frequency_threshold][agent_col].tolist()
+            
+            # Add frequency count to dataframe
+            df = df.merge(agent_frequency, on=agent_col, how='left')
+            df['critical_day_count'] = df['critical_day_count'].fillna(0)
+            
+            stage1_count = len(df[(df['anomaly'] == 1) & (df[agent_col].isin(high_freq_agents))])
+            stage1_agents = len(high_freq_agents)
+            
+            filtering_stats['stages'].append({
+                'name': 'Frequency Filter',
+                'description': f'Agents with {frequency_threshold}+ critical days',
+                'agents_remaining': stage1_agents,
+                'records_remaining': stage1_count
+            })
+    
+    # === STAGE 2: SEVERITY ANALYSIS ===
+    # Keep only top 15% by anomaly score
+    if 'anomaly_score' in df.columns:
+        score_threshold = df['anomaly_score'].quantile(0.85)  # Top 15%
+        high_severity_mask = (df['anomaly'] == 1) & (df['anomaly_score'] >= score_threshold)
+        
+        if date_col and 'critical_day_count' in df.columns:
+            # Combine frequency + severity
+            high_priority_mask = high_severity_mask & (df['critical_day_count'] >= frequency_threshold)
+        else:
+            high_priority_mask = high_severity_mask
+        
+        stage2_count = high_priority_mask.sum()
+        stage2_agents = df[high_priority_mask][agent_col].nunique()
+        
+        filtering_stats['stages'].append({
+            'name': 'Severity Filter',
+            'description': f'Top 15% anomaly scores (≥{score_threshold:.2f})',
+            'agents_remaining': stage2_agents,
+            'records_remaining': stage2_count
+        })
+    
+    # === STAGE 3: MULTI-METRIC CONSENSUS ===
+    # Calculate per-agent metric deviation count
+    if len(numeric_cols) >= 2:
+        # For each numeric column, check if agent's value is anomalous
+        agent_metric_scores = []
+        
+        for col in numeric_cols[:10]:  # Limit to first 10 metrics for performance
+            if col in df.columns:
+                # Calculate z-score per metric
+                col_mean = df[col].mean()
+                col_std = df[col].std()
+                
+                if col_std > 0:
+                    df[f'{col}_zscore'] = abs((df[col] - col_mean) / col_std)
+                    
+                    # Count agents with high z-score in this metric
+                    metric_anomalies = df[df[f'{col}_zscore'] > 2].groupby(agent_col).size()
+                    agent_metric_scores.append(metric_anomalies)
+        
+        # Count how many metrics each agent is anomalous in
+        if agent_metric_scores:
+            agent_metric_count = pd.concat(agent_metric_scores, axis=1).fillna(0).sum(axis=1)
+            agent_metric_count = agent_metric_count.reset_index()
+            agent_metric_count.columns = [agent_col, 'anomalous_metric_count']
+            
+            # Add to dataframe
+            df = df.merge(agent_metric_count, on=agent_col, how='left')
+            df['anomalous_metric_count'] = df['anomalous_metric_count'].fillna(0)
+            
+            # Filter: agents anomalous in 2+ metrics
+            multi_metric_agents = agent_metric_count[agent_metric_count['anomalous_metric_count'] >= 2][agent_col].tolist()
+            
+            if date_col and 'critical_day_count' in df.columns:
+                # Combine all three filters
+                final_mask = (
+                    (df['anomaly'] == 1) & 
+                    (df['anomaly_score'] >= score_threshold) &
+                    (df['critical_day_count'] >= frequency_threshold) &
+                    (df[agent_col].isin(multi_metric_agents))
+                )
+            else:
+                # Just severity + multi-metric
+                final_mask = (
+                    (df['anomaly'] == 1) & 
+                    (df['anomaly_score'] >= score_threshold) &
+                    (df[agent_col].isin(multi_metric_agents))
+                )
+            
+            stage3_count = final_mask.sum()
+            stage3_agents = df[final_mask][agent_col].nunique()
+            
+            filtering_stats['stages'].append({
+                'name': 'Multi-Metric Consensus',
+                'description': 'Anomalous in 2+ KPIs',
+                'agents_remaining': stage3_agents,
+                'records_remaining': stage3_count
+            })
+    
+    # === STAGE 4: INTELLIGENT TIERING ===
+    # Categorize remaining agents into action tiers
+    if 'anomalous_metric_count' in df.columns and 'critical_day_count' in df.columns:
+        def assign_audit_tier(row):
+            if row['anomaly'] == 0:
+                return 'NORMAL'
+            
+            metrics = row.get('anomalous_metric_count', 0)
+            days = row.get('critical_day_count', 0)
+            prob = row.get('anomaly_probability', 50)
+            
+            # TIER 1: Multiple metrics + frequent + high probability
+            if metrics >= 3 and days >= 5 and prob >= 90:
+                return 'TIER_1_CRITICAL'
+            # TIER 2: 2+ metrics + moderate frequency
+            elif metrics >= 2 and days >= 3 and prob >= 70:
+                return 'TIER_2_HIGH'
+            # TIER 3: Single metric or low frequency
+            elif metrics >= 1 and prob >= 50:
+                return 'TIER_3_MEDIUM'
+            else:
+                return 'TIER_4_LOW'
+        
+        df['audit_tier'] = df.apply(assign_audit_tier, axis=1)
+        
+        # Count agents per tier
+        tier_counts = {}
+        for tier in ['TIER_1_CRITICAL', 'TIER_2_HIGH', 'TIER_3_MEDIUM', 'TIER_4_LOW']:
+            tier_agents = df[df['audit_tier'] == tier][agent_col].nunique()
+            tier_counts[tier] = tier_agents
+        
+        filtering_stats['tier_distribution'] = tier_counts
+        
+        # Calculate recommended audit volume
+        tier1_audit = tier_counts.get('TIER_1_CRITICAL', 0)  # 100%
+        tier2_audit = int(tier_counts.get('TIER_2_HIGH', 0) * 0.5)  # 50%
+        tier3_audit = int(tier_counts.get('TIER_3_MEDIUM', 0) * 0.2)  # 20%
+        
+        filtering_stats['recommended_audit_count'] = tier1_audit + tier2_audit + tier3_audit
+        filtering_stats['final_agents'] = sum(tier_counts.values())
+    
+    return df, filtering_stats
+
 def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: list, method: str) -> dict:
     """Generate comprehensive insights"""
     try:
@@ -1432,7 +1621,7 @@ with col1:
     st.markdown("""
     <div class="main-header">
         <h1>🎯 Anomaly Detection Pro</h1>
-        <p>Enterprise-Grade Anomaly Detection Platform</p>
+        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1472,7 +1661,7 @@ with st.sidebar:
         • **LOF** - Local neighborhood outliers  
         • **One-Class SVM** - Non-linear boundaries
         
-        **🔧 NEW:** Expected rate is now a guide, not a quota!
+        **🔧 FIXED:** Expected rate is now a guide, not a quota!
         """)
     
     st.markdown("---")
@@ -1810,7 +1999,16 @@ with tab2:
                             st.session_state.detection_metadata = detection_metadata
                         
                         if results_df is not None:
-                            st.session_state.results_df = results_df
+                            # Apply intelligent filtering
+                            filtered_df, filtering_stats = apply_intelligent_filtering(
+                                results_df, 
+                                numeric_cols, 
+                                selected_categorical_cols, 
+                                date_col
+                            )
+                            
+                            st.session_state.results_df = filtered_df
+                            st.session_state.filtering_stats = filtering_stats
                             st.session_state.analysis_complete = True
                             st.session_state.selected_numeric_cols = numeric_cols
                             st.session_state.selected_categorical_cols = selected_categorical_cols
@@ -1898,6 +2096,57 @@ with tab3:
             st.markdown(create_metric_card("Method", method), unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
+        
+        # === INTELLIGENT FILTERING PANEL (NEW) ===
+        if 'filtering_stats' in st.session_state and st.session_state.filtering_stats.get('stages'):
+            st.markdown("### 🧠 INTELLIGENT FILTERING APPLIED")
+            
+            stats = st.session_state.filtering_stats
+            
+            # Show filtering funnel
+            initial_agents = stats.get('initial_agents', 0)
+            initial_anomalies = stats.get('initial_anomalies', 0)
+            
+            st.markdown(f"""
+            <div style='background: linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%); 
+                        padding: 1.5rem; border-radius: 12px; color: white; margin-bottom: 1.5rem;
+                        box-shadow: 0 4px 12px rgba(236, 72, 153, 0.3);'>
+                <h4 style='margin: 0 0 1rem 0; color: white;'>🎯 Smart Audit Funnel</h4>
+                <div style='font-size: 0.95rem; line-height: 1.8;'>
+                    <div>📊 <b>Initial Detection:</b> {initial_anomalies:,} anomalies from {initial_agents:,} agents</div>
+            """, unsafe_allow_html=True)
+            
+            # Show each filtering stage
+            for i, stage in enumerate(stats['stages'], 1):
+                st.markdown(f"""
+                    <div style='margin-left: 1.5rem; opacity: 0.95; margin-top: 0.5rem;'>
+                        ↓ <b>Stage {i} - {stage['name']}:</b> {stage['agents_remaining']:,} agents<br/>
+                        <span style='font-size: 0.85rem; opacity: 0.8;'>&nbsp;&nbsp;&nbsp;{stage['description']}</span>
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            # Final recommendation
+            if 'recommended_audit_count' in stats:
+                recommended = stats['recommended_audit_count']
+                final_agents = stats.get('final_agents', 0)
+                reduction_pct = (1 - recommended / initial_agents) * 100 if initial_agents > 0 else 0
+                
+                st.markdown(f"""
+                    <div style='margin-top: 1rem; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.3);'>
+                        <div style='font-size: 1.1rem;'><b>🎯 FINAL RECOMMENDATION:</b></div>
+                        <div style='font-size: 1.75rem; font-weight: 700; margin: 0.5rem 0;'>
+                            Audit {recommended:,} agents
+                        </div>
+                        <div style='font-size: 0.9rem; opacity: 0.9;'>
+                            ✓ {reduction_pct:.0f}% reduction from initial {initial_agents:,} flagged agents
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("</div>", unsafe_allow_html=True)
+            
+            st.markdown("---")
         
         # Risk Tier Distribution (NEW)
         if 'risk_tier' in df_results.columns:
