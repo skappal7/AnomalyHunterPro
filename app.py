@@ -821,9 +821,117 @@ def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, conta
 # INSIGHTS & VISUALIZATIONS
 # =============================================================================
 
-def apply_intelligent_filtering(df: pd.DataFrame, numeric_cols: list, categorical_cols: list = None, date_col: str = None, 
-                               enable_filtering: bool = True, frequency_threshold: int = 3, 
-                               severity_percentile: float = 0.85, multi_metric_threshold: int = 2) -> tuple[pd.DataFrame, dict]:
+def apply_intelligent_filtering(df: pd.DataFrame, numeric_cols: list, categorical_cols: list = None, 
+                               date_col: str = None, target_count: int = 50, 
+                               prioritize_consistency: bool = True) -> tuple[pd.DataFrame, dict]:
+    """Simple intelligent filtering - returns top N agents to audit
+    
+    Parameters:
+    - target_count: How many agents to recommend for audit
+    - prioritize_consistency: If True, boost agents with multiple bad days
+    
+    Returns: (df_with_priority_score, filtering_stats)
+    """
+    
+    if 'anomaly' not in df.columns or df['anomaly'].sum() == 0:
+        return df, {'mode': 'no_anomalies'}
+    
+    # Detect agent column
+    agent_col = None
+    for col in df.columns:
+        if any(keyword in col.lower() for keyword in ['agent', 'rep', 'employee', 'user']):
+            agent_col = col
+            break
+    
+    if not agent_col:
+        # No agent column - simple mode
+        df['priority_score'] = df.get('anomaly_score', 0) * df.get('anomaly_probability', 50) / 100
+        return df, {'mode': 'simple', 'note': 'No agent column detected'}
+    
+    # Calculate composite priority score per agent
+    agent_scores = []
+    
+    for agent in df[agent_col].unique():
+        agent_data = df[df[agent_col] == agent]
+        
+        # Base score: average anomaly probability
+        avg_probability = agent_data['anomaly_probability'].mean() if 'anomaly_probability' in agent_data else 50
+        
+        # Frequency bonus: how many critical/high days
+        if 'risk_tier' in agent_data.columns:
+            critical_days = len(agent_data[agent_data['risk_tier'].isin(['CRITICAL', 'HIGH'])])
+            frequency_score = min(critical_days * 10, 50)  # Cap at 50 points
+        else:
+            critical_days = len(agent_data[agent_data['anomaly'] == 1])
+            frequency_score = min(critical_days * 10, 50)
+        
+        # Severity bonus: max anomaly score
+        max_score = agent_data['anomaly_score'].max() if 'anomaly_score' in agent_data else 0
+        severity_score = (max_score / 10) * 30  # Scale to 30 points max
+        
+        # Multi-metric bonus: count of anomalous metrics
+        if 'anomalous_metric_count' in agent_data.columns:
+            metric_count = agent_data['anomalous_metric_count'].max()
+            multi_metric_score = min(metric_count * 5, 20)  # Cap at 20 points
+        else:
+            multi_metric_score = 0
+        
+        # Composite score calculation
+        if prioritize_consistency:
+            # Weight frequency heavily
+            priority_score = (
+                avg_probability * 0.4 +  # 40% weight on probability
+                frequency_score * 0.35 +  # 35% weight on consistency
+                severity_score * 0.15 +   # 15% weight on severity
+                multi_metric_score * 0.10  # 10% weight on multi-metric
+            )
+        else:
+            # Weight severity more
+            priority_score = (
+                avg_probability * 0.35 +  
+                frequency_score * 0.20 +  
+                severity_score * 0.35 +   
+                multi_metric_score * 0.10
+            )
+        
+        agent_scores.append({
+            agent_col: agent,
+            'priority_score': priority_score,
+            'critical_days': critical_days,
+            'avg_probability': avg_probability,
+            'max_severity': max_score
+        })
+    
+    # Create priority dataframe
+    priority_df = pd.DataFrame(agent_scores)
+    priority_df = priority_df.sort_values('priority_score', ascending=False).reset_index(drop=True)
+    
+    # Select top N agents
+    top_agents = priority_df.head(target_count)[agent_col].tolist()
+    
+    # Add priority scores to original dataframe
+    df = df.merge(priority_df[[agent_col, 'priority_score']], on=agent_col, how='left')
+    df['priority_score'] = df['priority_score'].fillna(0)
+    
+    # Mark recommended agents
+    df['recommended_for_audit'] = df[agent_col].isin(top_agents)
+    
+    # Calculate statistics
+    initial_anomaly_agents = df[df['anomaly'] == 1][agent_col].nunique()
+    
+    filtering_stats = {
+        'mode': 'intelligent',
+        'agent_column': agent_col,
+        'initial_anomaly_agents': initial_anomaly_agents,
+        'target_count': target_count,
+        'recommended_count': len(top_agents),
+        'prioritize_consistency': prioritize_consistency,
+        'top_agents': priority_df.head(target_count).to_dict('records')
+    }
+    
+    return df, filtering_stats
+
+def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: list, method: str) -> dict:
     """Apply intelligent multi-stage filtering to identify high-priority audit targets
     
     Configurable parameters:
@@ -1848,7 +1956,7 @@ with col1:
     st.markdown("""
     <div class="main-header">
         <h1>🎯 Anomaly Detection Pro</h1>
-        <p>Enterprise-Grade Anomaly Detection Platform</p>
+        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1888,7 +1996,7 @@ with st.sidebar:
         • **LOF** - Local neighborhood outliers  
         • **One-Class SVM** - Non-linear boundaries
         
-        **🔧 NEW:** Expected rate is now a guide, not a quota!
+        **🔧 FIXED:** Expected rate is now a guide, not a quota!
         """)
     
     st.markdown("---")
@@ -2193,61 +2301,30 @@ with tab2:
         
         st.markdown("---")
         
-        # === INTELLIGENT FILTERING CONTROLS (NEW) ===
-        st.markdown("#### 🎛️ Intelligent Filtering (Optional)")
+        # === SIMPLE AUDIT CONTROLS (NEW) ===
+        st.markdown("#### 🎯 Audit Planning")
         
-        col1, col2 = st.columns([1, 3])
+        col1, col2 = st.columns([2, 1])
         
         with col1:
-            enable_filtering = st.checkbox(
-                "Enable Smart Filtering",
-                value=True,
-                help="Apply multi-stage filtering to reduce audit volume"
+            target_audit_count = st.slider(
+                "How many agents should I audit?",
+                min_value=10,
+                max_value=min(200, st.session_state.row_count // 2),
+                value=min(50, st.session_state.row_count // 10),
+                step=5,
+                help="Select your target audit volume - the tool will identify the highest priority agents"
             )
         
         with col2:
-            if enable_filtering:
-                st.info("📊 Filtering will prioritize agents with consistent patterns across multiple metrics and days")
+            st.markdown("<br>", unsafe_allow_html=True)
+            prioritize_consistency = st.checkbox(
+                "Prioritize consistent patterns",
+                value=True,
+                help="Focus on agents with multiple bad days (recommended)"
+            )
         
-        if enable_filtering:
-            with st.expander("⚙️ Advanced Filtering Settings", expanded=False):
-                st.markdown("**Adjust thresholds to control filtering strictness:**")
-                
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    frequency_threshold = st.slider(
-                        "Minimum Critical Days",
-                        min_value=1,
-                        max_value=7,
-                        value=2,
-                        help="How many critical days before flagging an agent (lower = more agents)"
-                    )
-                
-                with col2:
-                    severity_pct = st.slider(
-                        "Top % by Score",
-                        min_value=5,
-                        max_value=30,
-                        value=15,
-                        help="Keep top X% highest anomaly scores (lower = fewer agents)"
-                    )
-                    severity_percentile = 1 - (severity_pct / 100)
-                
-                with col3:
-                    multi_metric_threshold = st.slider(
-                        "Metrics Affected",
-                        min_value=1,
-                        max_value=min(3, len(numeric_cols)),
-                        value=min(2, len(numeric_cols)),
-                        help="Minimum KPIs showing anomalies (higher = stricter)"
-                    )
-                
-                st.caption(f"💡 Current settings will keep agents with: {frequency_threshold}+ critical days, top {severity_pct}% scores, anomalous in {multi_metric_threshold}+ metrics")
-        else:
-            frequency_threshold = 1
-            severity_percentile = 0.85
-            multi_metric_threshold = 1
+        st.caption(f"💡 The tool will identify the top {target_audit_count} agents most likely to have issues")
         
         st.markdown("---")
         
@@ -2284,16 +2361,14 @@ with tab2:
                             st.session_state.detection_metadata = detection_metadata
                         
                         if results_df is not None:
-                            # Apply intelligent filtering with user-configured parameters
+                            # Apply intelligent filtering with simple user controls
                             filtered_df, filtering_stats = apply_intelligent_filtering(
                                 results_df, 
                                 numeric_cols, 
                                 selected_categorical_cols, 
                                 date_col,
-                                enable_filtering=enable_filtering,
-                                frequency_threshold=frequency_threshold,
-                                severity_percentile=severity_percentile,
-                                multi_metric_threshold=multi_metric_threshold
+                                target_count=target_audit_count,
+                                prioritize_consistency=prioritize_consistency
                             )
                             
                             st.session_state.results_df = filtered_df
@@ -2386,73 +2461,51 @@ with tab3:
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # === INTELLIGENT FILTERING PANEL (NEW) ===
+        # === AUDIT RECOMMENDATION (SIMPLIFIED) ===
         if 'filtering_stats' in st.session_state:
             stats = st.session_state.filtering_stats
             
-            # Check if filtering was disabled
-            if stats.get('filtering_disabled'):
-                st.info("ℹ️ **Intelligent filtering was disabled** - Showing all detected anomalies")
-            elif stats.get('stages'):
-                st.markdown("### 🧠 INTELLIGENT FILTERING APPLIED")
+            if stats.get('mode') == 'intelligent':
+                st.markdown("### 🎯 AUDIT RECOMMENDATION")
                 
-                # Show configuration
-                if 'config' in stats:
-                    config = stats['config']
-                    st.caption(f"⚙️ Settings: {config['frequency_threshold']}+ critical days | " +
-                             f"Top {(1-config['severity_percentile'])*100:.0f}% scores | " +
-                             f"{config['multi_metric_threshold']}+ metrics")
-                
-                # Show filtering funnel
-                initial_agents = stats.get('initial_agents', 0)
-                initial_anomalies = stats.get('initial_anomalies', 0)
+                recommended = stats['recommended_count']
+                initial = stats['initial_anomaly_agents']
                 
                 st.markdown(f"""
-                <div style='background: linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%); 
-                            padding: 1.5rem; border-radius: 12px; color: white; margin-bottom: 1.5rem;
-                            box-shadow: 0 4px 12px rgba(236, 72, 153, 0.3);'>
-                    <h4 style='margin: 0 0 1rem 0; color: white;'>🎯 Smart Audit Funnel</h4>
-                    <div style='font-size: 0.95rem; line-height: 1.8;'>
-                        <div>📊 <b>Initial Detection:</b> {initial_anomalies:,} anomalies from {initial_agents:,} agents</div>
+                <div style='background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); 
+                            padding: 2rem; border-radius: 12px; color: white; margin-bottom: 1.5rem;
+                            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);'>
+                    <div style='font-size: 1rem; opacity: 0.9; margin-bottom: 0.5rem;'>
+                        Out of {initial:,} agents with anomalies detected...
+                    </div>
+                    <div style='font-size: 2.5rem; font-weight: 700; margin: 1rem 0;'>
+                        Focus on these {recommended:,} agents
+                    </div>
+                    <div style='font-size: 1rem; opacity: 0.95;'>
+                        {'✓ Prioritized by consistent patterns across multiple days' if stats.get('prioritize_consistency') else '✓ Ranked by severity and anomaly scores'}
+                    </div>
+                </div>
                 """, unsafe_allow_html=True)
                 
-                # Show each filtering stage
-                for i, stage in enumerate(stats['stages'], 1):
-                    st.markdown(f"""
-                        <div style='margin-left: 1.5rem; opacity: 0.95; margin-top: 0.5rem;'>
-                            ↓ <b>Stage {i} - {stage['name']}:</b> {stage['agents_remaining']:,} agents<br/>
-                            <span style='font-size: 0.85rem; opacity: 0.8;'>&nbsp;&nbsp;&nbsp;{stage['description']}</span>
-                        </div>
-                    """, unsafe_allow_html=True)
-                
-                # Final recommendation
-                if 'recommended_audit_count' in stats:
-                    recommended = stats['recommended_audit_count']
-                    final_agents = stats.get('final_agents', 0)
-                    reduction_pct = (1 - recommended / initial_agents) * 100 if initial_agents > 0 else 0
-                    
-                    st.markdown(f"""
-                        <div style='margin-top: 1rem; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.3);'>
-                            <div style='font-size: 1.1rem;'><b>🎯 FINAL RECOMMENDATION:</b></div>
-                            <div style='font-size: 1.75rem; font-weight: 700; margin: 0.5rem 0;'>
-                                Audit {recommended:,} agents (from {final_agents:,} filtered)
-                            </div>
-                            <div style='font-size: 0.9rem; opacity: 0.9;'>
-                                ✓ {reduction_pct:.0f}% reduction from initial {initial_agents:,} flagged agents
-                            </div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Show tip for adjusting if too few
-                    if recommended < 10 and initial_agents > 50:
-                        st.warning(f"⚠️ **Filtering may be too strict** ({recommended} agents recommended). " +
-                                 "Consider: (1) Lowering 'Minimum Critical Days' to 1-2, or (2) Increasing 'Top % by Score' to 20-25%, or (3) Reducing 'Metrics Affected' to 1")
-                    elif recommended > initial_agents * 0.5:
-                        st.info(f"💡 **Filtering is lenient** ({recommended} agents recommended). " +
-                              "Consider increasing strictness if you want fewer agents to audit.")
-                else:
-                    st.markdown("</div>", unsafe_allow_html=True)
+                # Show top 10 agents preview
+                if 'top_agents' in stats and len(stats['top_agents']) > 0:
+                    with st.expander("👀 Preview Top 10 Priority Agents", expanded=True):
+                        top_preview = pd.DataFrame(stats['top_agents'][:10])
+                        
+                        # Clean up display
+                        display_cols = [col for col in top_preview.columns if col != 'agent_column']
+                        if display_cols:
+                            # Rename for clarity
+                            top_preview_display = top_preview[display_cols].copy()
+                            if 'priority_score' in top_preview_display.columns:
+                                top_preview_display['priority_score'] = top_preview_display['priority_score'].round(1)
+                            if 'avg_probability' in top_preview_display.columns:
+                                top_preview_display['avg_probability'] = top_preview_display['avg_probability'].round(1)
+                            if 'max_severity' in top_preview_display.columns:
+                                top_preview_display['max_severity'] = top_preview_display['max_severity'].round(2)
+                            
+                            st.dataframe(top_preview_display, use_container_width=True, height=400)
+                            st.caption("💡 Export the full list using filters below")
                 
                 st.markdown("---")
         
@@ -2606,53 +2659,51 @@ with tab3:
         # Full results with filters
         st.markdown("### 📋 DETAILED RESULTS")
         
-        # Add filters if risk tier column exists
-        if 'risk_tier' in df_results.columns:
-            col1, col2, col3 = st.columns([2, 2, 1])
-            
-            with col1:
+        # Add filters
+        col1, col2, col3 = st.columns([2, 2, 1])
+        
+        with col1:
+            if 'recommended_for_audit' in df_results.columns:
+                show_recommended = st.checkbox("Show Recommended Agents Only", value=True, help="Filter to agents recommended for audit")
+            else:
+                show_recommended = False
+        
+        with col2:
+            if 'risk_tier' in df_results.columns:
                 tier_filter = st.multiselect(
                     "Filter by Risk Tier",
                     options=['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'],
-                    default=['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'],
+                    default=['CRITICAL', 'HIGH'],
                     help="Select tiers to display"
                 )
-            
-            with col2:
-                prob_range = st.slider(
-                    "Anomaly Probability Range (%)",
-                    0, 100, (0, 100),
-                    help="Filter by probability percentage"
-                )
-            
-            with col3:
-                st.markdown("<br>", unsafe_allow_html=True)
-                anomaly_only = st.checkbox("Anomalies Only", value=True)
-            
-            # Apply filters
-            filtered_df = df_results.copy()
-            
-            if tier_filter:
-                filtered_df = filtered_df[filtered_df['risk_tier'].isin(tier_filter)]
-            
-            filtered_df = filtered_df[
-                (filtered_df['anomaly_probability'] >= prob_range[0]) & 
-                (filtered_df['anomaly_probability'] <= prob_range[1])
-            ]
-            
-            if anomaly_only:
-                filtered_df = filtered_df[filtered_df['anomaly'] == 1]
-            
-            st.info(f"📊 Showing {len(filtered_df):,} of {len(df_results):,} records")
-            
-            # Sort by probability descending for better UX
+            else:
+                tier_filter = None
+        
+        with col3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            anomaly_only = st.checkbox("Anomalies Only", value=True)
+        
+        # Apply filters
+        filtered_df = df_results.copy()
+        
+        if show_recommended and 'recommended_for_audit' in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df['recommended_for_audit'] == True]
+        
+        if tier_filter and 'risk_tier' in filtered_df.columns:
+            filtered_df = filtered_df[filtered_df['risk_tier'].isin(tier_filter)]
+        
+        if anomaly_only:
+            filtered_df = filtered_df[filtered_df['anomaly'] == 1]
+        
+        # Sort by priority if available
+        if 'priority_score' in filtered_df.columns:
+            filtered_df = filtered_df.sort_values('priority_score', ascending=False)
+        elif 'anomaly_probability' in filtered_df.columns:
             filtered_df = filtered_df.sort_values('anomaly_probability', ascending=False)
-            
-            st.dataframe(filtered_df, use_container_width=True, height=400)
-        else:
-            # No filters, show all
-            with st.expander("📋 Full Results Table"):
-                st.dataframe(df_results, use_container_width=True, height=400)
+        
+        st.info(f"📊 Showing {len(filtered_df):,} of {len(df_results):,} records")
+        
+        st.dataframe(filtered_df, use_container_width=True, height=400)
         
         st.markdown("---")
         
