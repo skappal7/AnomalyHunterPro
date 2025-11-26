@@ -485,8 +485,8 @@ DETECTION_METHODS = {
     },
 }
 
-def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, method: str = 'zscore', threshold: float = 3) -> pd.DataFrame | None:
-    """SQL-based statistical anomaly detection"""
+def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, method: str = 'zscore', threshold: float = 3) -> tuple[pd.DataFrame | None, dict]:
+    """SQL-based statistical anomaly detection - returns (dataframe, metadata)"""
     try:
         if method == 'zscore':
             select_parts = [f"""
@@ -503,6 +503,12 @@ def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, met
             df = con.execute(query).df()
             df['anomaly'] = (df['max_zscore'] > threshold).astype(int)
             df['anomaly_score'] = df['max_zscore']
+            
+            metadata = {
+                'method': 'zscore',
+                'threshold_value': threshold,
+                'threshold_display': f"{threshold:.1f}σ (standard deviations)"
+            }
             
         else:  # IQR method
             percentiles = {}
@@ -537,11 +543,17 @@ def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, met
                 scores.append(score)
             
             df['anomaly_score'] = np.max(scores, axis=0)
+            
+            metadata = {
+                'method': 'iqr',
+                'threshold_value': 1.5,
+                'threshold_display': "1.5×IQR range"
+            }
         
-        return df
+        return df, metadata
     except Exception as e:
         st.error(f"Error in statistical detection: {e}")
-        return None
+        return None, {}
 
 def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, contamination: float = 0.1) -> tuple[pd.DataFrame | None, dict]:
     """ML-based anomaly detection using score-based thresholding instead of hard contamination constraint
@@ -629,9 +641,11 @@ def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, conta
         actual_count = df_clean['anomaly'].sum()
         
         return df_clean, {
+            'method': 'ml',
             'expected_anomalies': expected_count,
             'actual_anomalies': actual_count,
-            'threshold_used': adaptive_threshold
+            'threshold_value': adaptive_threshold,
+            'threshold_display': f"{adaptive_threshold:.2f} (0-10 scale)"
         }
     except Exception as e:
         st.error(f"Error in ML detection: {e}")
@@ -662,7 +676,9 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         if 'detection_metadata' in st.session_state:
             metadata = st.session_state.detection_metadata
             insights['expected_anomalies'] = metadata.get('expected_anomalies', None)
-            insights['threshold_used'] = metadata.get('threshold_used', None)
+            insights['threshold_value'] = metadata.get('threshold_value', None)
+            insights['threshold_display'] = metadata.get('threshold_display', None)
+            insights['detection_method_type'] = metadata.get('method', None)
         
         # Category-level analysis
         if categorical_cols:
@@ -750,10 +766,9 @@ def generate_narrative(insights: dict, categorical_cols: list, numeric_cols: lis
     
     narrative += f"\n{verdict}\n"
     
-    # Threshold info if available
-    if 'threshold_used' in insights:
-        threshold = insights['threshold_used']
-        narrative += f"\n**Detection threshold:** {threshold:.2f} (on 0-10 scale)\n"
+    # Threshold info if available - method-aware display
+    if 'threshold_display' in insights and insights['threshold_display']:
+        narrative += f"\n**Detection threshold:** {insights['threshold_display']}\n"
     
     # Top finding - feature importance
     if 'feature_importance' in insights and insights['feature_importance']:
@@ -1227,7 +1242,6 @@ with tab1:
             st.session_state.column_info = get_column_stats(con, parquet_path)
             
             st.success("✅ Sample data loaded!")
-            st.balloons()
     
     elif uploaded_file:
         file_type = detect_file_type(uploaded_file)
@@ -1252,7 +1266,6 @@ with tab1:
                         <p><b>Rows:</b> {row_count:,} | <b>Columns:</b> {col_count}</p>
                     </div>
                     """, unsafe_allow_html=True)
-                    st.balloons()
         else:
             st.error("❌ Unsupported file format")
     
@@ -1441,8 +1454,8 @@ with tab2:
                             # Store metadata in session state
                             st.session_state.detection_metadata = detection_metadata
                         else:
-                            results_df = detect_anomalies_statistical(con, st.session_state.parquet_path, numeric_cols, detection_method, threshold if detection_method == 'zscore' else 3)
-                            st.session_state.detection_metadata = {}
+                            results_df, detection_metadata = detect_anomalies_statistical(con, st.session_state.parquet_path, numeric_cols, detection_method, threshold if detection_method == 'zscore' else 3)
+                            st.session_state.detection_metadata = detection_metadata
                         
                         if results_df is not None:
                             st.session_state.results_df = results_df
@@ -1466,7 +1479,6 @@ with tab2:
                             display_lottie(lottie_success, height=150, key="success_animation")
                             
                             st.success(f"✅ Complete in {elapsed_time:.2f}s!")
-                            st.balloons()
                             
                             anomaly_count = results_df['anomaly'].sum()
                             anomaly_rate = (anomaly_count / len(results_df) * 100)
