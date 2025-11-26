@@ -1138,9 +1138,13 @@ def generate_pdf_report(insights: dict, categorical_cols: list, numeric_cols: li
         elements.append(Paragraph(f"<b>Anomalies Detected:</b> {insights['anomalies']:,} ({insights['anomaly_rate']:.2f}%)", styles['Normal']))
         elements.append(Paragraph(f"<b>Detection Method:</b> {insights['method']}", styles['Normal']))
         
-        # Show expected vs actual if available
-        if 'expected_anomalies' in insights:
+        # Show expected vs actual if available (only for ML methods)
+        if 'expected_anomalies' in insights and insights['expected_anomalies'] is not None:
             elements.append(Paragraph(f"<b>Expected Anomalies:</b> {insights['expected_anomalies']:,}", styles['Normal']))
+        
+        # Show threshold if available
+        if 'threshold_display' in insights and insights['threshold_display']:
+            elements.append(Paragraph(f"<b>Detection Threshold:</b> {insights['threshold_display']}", styles['Normal']))
         
         elements.append(Paragraph(f"<b>Analysis Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
         elements.append(Spacer(1, 20))
@@ -1218,7 +1222,7 @@ with col1:
     st.markdown("""
     <div class="main-header">
         <h1>🎯 Anomaly Detection Pro</h1>
-        <p>Enterprise-Grade Anomaly Detection Platform Version 1.0</p>
+        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1258,7 +1262,7 @@ with st.sidebar:
         • **LOF** - Local neighborhood outliers  
         • **One-Class SVM** - Non-linear boundaries
         
-        **🔧 Improved:** Expected rate is now a guide, not a quota!
+        **🔧 FIXED:** Expected rate is now a guide, not a quota!
         """)
     
     st.markdown("---")
@@ -1843,7 +1847,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Detection Pro</b> | Developed by CE Innovations Team 2025<br>
+        🎯 <b>Anomaly Detection Pro - FIXED</b> | Developed by CE Innovations Team 2025<br>
         Powered by DuckDB • PyArrow • Scikit-learn • Plotly | Score-Based Detection ✓
     </p>
 </div>
