@@ -2,28 +2,49 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
 from pathlib import Path
 import tempfile
 import os
 from io import BytesIO
 import time
 from datetime import datetime
-from typing import Tuple, Dict, List, Optional
+from typing import Any
+import requests
+import json
 
+# ML Libraries
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
-from sklearn.covariance import EllipticEnvelope
+from scipy import stats
 
+# Visualization
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# CRITICAL: Set page config FIRST before ANY other Streamlit commands
-st.set_page_config(page_title="Anomaly Hunter Pro", layout="wide", page_icon="🎯")
+# PDF Generation
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
 
-# CRITICAL: Initialize session state IMMEDIATELY after page config
+# =============================================================================
+# PAGE CONFIG & STYLING
+# =============================================================================
+
+st.set_page_config(
+    page_title="Anomaly Detection Pro 🎯",
+    layout="wide",
+    page_icon="🎯",
+    initial_sidebar_state="expanded"
+)
+
+# Initialize session state IMMEDIATELY after page config
 if 'initialized' not in st.session_state:
     st.session_state.initialized = True
     st.session_state.parquet_path = None
@@ -31,394 +52,364 @@ if 'initialized' not in st.session_state:
     st.session_state.data_loaded = False
     st.session_state.row_count = 0
     st.session_state.column_info = {}
+    st.session_state.analysis_complete = False
     st.session_state.results_df = None
     st.session_state.temp_dir = tempfile.mkdtemp()
-    st.session_state.selected_numeric = []
-    st.session_state.selected_categorical = []
-    st.session_state.selected_date = None
-    st.session_state.engineered_features = []
-    st.session_state.analysis_history = []
+    st.session_state.selected_numeric_cols = []
+    st.session_state.selected_categorical_cols = []
+    st.session_state.selected_date_col = None
+    st.session_state.selected_method = None
 
-# Professional light UI theme - Complete light grey and white
+# Minimalist CSS with fixed scaling
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
     
     * {
         font-family: 'Inter', sans-serif;
     }
     
+    /* Force proper scaling */
     .main .block-container {
-        max-width: 1600px;
-        padding: 1.5rem 2rem 3rem 2rem;
-        background-color: #ffffff;
-    }
-    
-    /* Light grey sidebar */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #f8f9fa 0%, #e9ecef 100%);
+        max-width: 1400px;
         padding-top: 2rem;
-        border-right: 1px solid #dee2e6;
+        padding-bottom: 2rem;
     }
     
-    [data-testid="stSidebar"] * {
-        color: #1a202c !important;
+    .main-header {
+        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+        padding: 2rem;
+        border-radius: 12px;
+        text-align: center;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
     }
     
-    [data-testid="stSidebar"] h2,
-    [data-testid="stSidebar"] h3 {
-        color: #1a202c !important;
-        font-weight: 600;
-    }
-    
-    [data-testid="stSidebar"] .stButton button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white !important;
-        border: none;
-        width: 100%;
-        padding: 0.65rem;
-        font-weight: 600;
-        border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-        transition: all 0.3s ease;
-    }
-    
-    [data-testid="stSidebar"] .stButton button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
-    }
-    
-    /* Fix dropdown text colors */
-    [data-testid="stSidebar"] .stSelectbox label,
-    [data-testid="stSidebar"] .stMultiSelect label,
-    [data-testid="stSidebar"] .stSlider label,
-    [data-testid="stSidebar"] .stRadio label,
-    [data-testid="stSidebar"] label {
-        color: #1a202c !important;
-        font-weight: 500;
-    }
-    
-    [data-testid="stSidebar"] [data-baseweb="select"] > div,
-    [data-testid="stSidbar"] [data-baseweb="select"] span,
-    [data-testid="stSidebar"] input {
-        color: #1a202c !important;
-    }
-    
-    /* Main content */
-    h1 {
-        color: #1a202c;
+    .main-header h1 {
+        color: white;
         font-size: 2.5rem;
         font-weight: 700;
-        margin-bottom: 0.5rem;
+        margin: 0;
+        letter-spacing: -0.02em;
     }
     
-    h2 {
-        color: #1a202c;
-        font-size: 1.5rem;
-        font-weight: 600;
-        margin: 2rem 0 1rem 0;
-        border-bottom: 2px solid #e2e8f0;
-        padding-bottom: 0.5rem;
-    }
-    
-    h3 {
-        color: #2d3748;
-        font-size: 1.2rem;
-        font-weight: 600;
-        margin: 1.5rem 0 0.75rem 0;
-    }
-    
-    p, li, span, label, div {
-        color: #2d3748 !important;
-    }
-    
-    .stMarkdown {
-        color: #2d3748;
-    }
-    
-    /* Main area buttons */
-    .stButton button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white !important;
-        border: none;
-        padding: 0.65rem 1.5rem;
-        font-weight: 600;
-        border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-        transition: all 0.3s ease;
-    }
-    
-    .stButton button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+    .main-header p {
+        color: rgba(255, 255, 255, 0.9);
+        font-size: 1rem;
+        margin-top: 0.5rem;
+        font-weight: 300;
     }
     
     .metric-card {
-        background: linear-gradient(135deg, #ffffff 0%, #f7fafc 100%);
-        padding: 1.5rem;
-        border-radius: 12px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        background: white;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
         text-align: center;
-        border: 1px solid #e2e8f0;
-        transition: all 0.3s ease;
+        border-left: 4px solid #6366f1;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
     
     .metric-card:hover {
-        transform: translateY(-4px);
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
     }
     
     .metric-value {
-        font-size: 2.25rem;
+        font-size: 1.75rem;
         font-weight: 700;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin: 0.5rem 0;
+        margin: 0.25rem 0;
+        color: #1e293b;
     }
     
     .metric-label {
-        font-size: 0.875rem;
-        color: #718096 !important;
+        font-size: 0.75rem;
+        color: #64748b;
         font-weight: 600;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
+        letter-spacing: 0.05em;
+    }
+    
+    .info-box, .success-box {
+        background: white;
+        padding: 1.25rem;
+        border-radius: 10px;
+        margin: 1rem 0;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
     }
     
     .info-box {
-        background: linear-gradient(135deg, #ebf4ff 0%, #dbeafe 100%);
-        border-left: 4px solid #3b82f6;
-        padding: 1.25rem;
-        border-radius: 8px;
-        margin: 1rem 0;
-        box-shadow: 0 2px 8px rgba(59, 130, 246, 0.1);
-    }
-    
-    .info-box * {
-        color: #1e40af !important;
-    }
-    
-    .warning-box {
-        background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
         border-left: 4px solid #f59e0b;
-        padding: 1.25rem;
-        border-radius: 8px;
-        margin: 1rem 0;
-        box-shadow: 0 2px 8px rgba(245, 158, 11, 0.1);
-    }
-    
-    .warning-box * {
-        color: #92400e !important;
     }
     
     .success-box {
-        background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
         border-left: 4px solid #10b981;
-        padding: 1.25rem;
+    }
+    
+    .stButton>button {
+        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+        color: white;
+        border: none;
         border-radius: 8px;
-        margin: 1rem 0;
-        box-shadow: 0 2px 8px rgba(16, 185, 129, 0.1);
+        padding: 0.625rem 1.5rem;
+        font-weight: 600;
+        transition: all 0.2s ease;
+        box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+        letter-spacing: 0.02em;
+        font-size: 0.875rem;
     }
     
-    .success-box * {
-        color: #065f46 !important;
+    .stButton>button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
     }
     
-    .error-box {
-        background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
-        border-left: 4px solid #ef4444;
-        padding: 1.25rem;
-        border-radius: 8px;
-        margin: 1rem 0;
-        box-shadow: 0 2px 8px rgba(239, 68, 68, 0.1);
+    /* Sidebar fixes */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #1e293b 0%, #334155 100%);
+        padding-top: 2rem;
     }
     
-    .error-box * {
-        color: #991b1b !important;
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
+        color: white;
+        font-size: 0.95rem;
+        line-height: 1.6;
     }
     
-    .stDataFrame {
-        border: 1px solid #e2e8f0;
-        border-radius: 8px;
-        overflow: hidden;
+    [data-testid="stSidebar"] h2 {
+        color: white;
+        font-size: 1.25rem;
+        margin-bottom: 1rem;
     }
     
-    div[data-testid="stExpander"] {
-        border: 1px solid #e2e8f0;
-        border-radius: 8px;
-        background: white;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+    [data-testid="stSidebar"] h3 {
+        color: white;
+        font-size: 1rem;
+        margin-top: 1rem;
+        margin-bottom: 0.5rem;
+    }
+    
+    [data-testid="stSidebar"] .stButton>button {
+        width: 100%;
+        font-size: 0.875rem;
+    }
+    
+    /* Improved expander in sidebar */
+    [data-testid="stSidebar"] .streamlit-expanderHeader {
+        color: white;
+        font-size: 0.9rem;
+        background-color: rgba(255, 255, 255, 0.1);
+        border-radius: 6px;
+    }
+    
+    .stProgress > div > div {
+        background: linear-gradient(90deg, #6366f1 0%, #8b5cf6 100%);
     }
     
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
-        background: #f7fafc;
-        padding: 0.5rem;
-        border-radius: 8px;
     }
     
     .stTabs [data-baseweb="tab"] {
         background: white;
-        color: #4a5568 !important;
-        border: 1px solid #e2e8f0;
-        border-radius: 6px;
-        padding: 0.65rem 1.5rem;
+        border-radius: 8px;
+        color: #64748b;
         font-weight: 600;
-        transition: all 0.3s ease;
+        padding: 0.75rem 1.5rem;
+        border: 2px solid #e2e8f0;
+        font-size: 0.875rem;
     }
     
-    .stTabs [data-baseweb="tab"]:hover {
-        background: #edf2f7;
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+        color: white;
+        border: 2px solid transparent;
     }
     
-    .stTabs [data-baseweb="tab"][aria-selected="true"] {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white !important;
-        border: none;
+    /* Better form labels */
+    .stSelectbox label, .stMultiSelect label, .stSlider label {
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: #1e293b;
     }
     
-    .stProgress > div > div {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-    }
-    
-    hr {
-        margin: 2rem 0;
-        border: none;
-        border-top: 2px solid #e2e8f0;
-    }
-    
-    /* Fix all select/input text to be dark */
-    [data-baseweb="select"] > div,
-    [data-baseweb="select"] span,
-    input,
-    textarea {
-        color: #1a202c !important;
-    }
-    
-    /* Radio buttons text */
+    /* Radio button horizontal layout */
     .stRadio > div {
-        color: #1a202c !important;
+        flex-direction: row;
+        gap: 1rem;
     }
     
-    .stRadio label {
-        color: #1a202c !important;
+    .lottie-container {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 1.5rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Helper functions
-def get_file_type(filename: str) -> Optional[str]:
-    """Determine file type from extension"""
-    ext = Path(filename).suffix.lower()
-    mapping = {
-        '.csv': 'csv',
-        '.txt': 'csv',
-        '.xlsx': 'xlsx',
-        '.xls': 'xlsx',
-        '.parquet': 'parquet'
-    }
-    return mapping.get(ext)
+# =============================================================================
+# LOTTIE ANIMATION LOADER
+# =============================================================================
 
-def convert_to_parquet(file, file_type: str) -> Tuple[Optional[str], int, int]:
-    """Convert uploaded file to Parquet format using DuckDB"""
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
+def load_lottie_url(url: str) -> dict | None:
+    """Load Lottie animation from URL"""
     try:
-        status_text.text("📁 Reading file...")
-        progress_bar.progress(10)
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            return r.json()
+    except:
+        pass
+    return None
+
+def display_lottie(lottie_json: dict | None, height: int = 200, key: str = None):
+    """Display Lottie animation using streamlit-lottie"""
+    if lottie_json:
+        try:
+            from streamlit_lottie import st_lottie
+            st_lottie(lottie_json, height=height, key=key)
+        except ImportError:
+            # Fallback if streamlit-lottie not installed
+            st.info("💡 Install streamlit-lottie for animations: `pip install streamlit-lottie`")
+
+# Lottie animation URLs (free from LottieFiles)
+LOTTIE_URLS = {
+    'upload': 'https://lottie.host/6dadc34a-b444-48fb-a796-e6b8b5a54172/QtBAFnRjNv.json',
+    'processing': 'https://lottie.host/74287700-bcf8-489b-a4da-7f749e114c3c/mxSexILitR.json',
+    'success': 'https://lottie.host/68f99417-882d-48e7-990d-1db441c73c7e/7zNWZQiOK0.json',
+    'empty': 'https://lottie.host/415990e8-43a1-44db-a967-cb4f989c7dda/kZDZtv4i60.json',
+    'hero': 'https://lottie.host/35b4b211-d909-41e5-8ea6-cfd26d9ee338/Un0LjC6t8a.json'
+}
+
+
+
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def detect_file_type(file) -> str | None:
+    """Detect file type from uploaded file using match/case"""
+    filename = file.name.lower()
+    match Path(filename).suffix:
+        case '.csv': return 'csv'
+        case '.xlsx': return 'xlsx'
+        case '.xls': return 'xls'
+        case '.txt': return 'txt'
+        case '.parquet': return 'parquet'
+        case _: return None
+
+def convert_to_parquet(file, file_type: str) -> tuple[str | None, int, int]:
+    """Convert files to Parquet using DuckDB - handles large files efficiently"""
+    try:
+        progress = st.progress(0, text="🔄 Reading file...")
         
         parquet_path = os.path.join(st.session_state.temp_dir, 'data.parquet')
-        temp_input = os.path.join(st.session_state.temp_dir, f'temp_input.{file_type}')
+        temp_csv = os.path.join(st.session_state.temp_dir, 'temp_data.csv')
         
-        # Save uploaded file
-        with open(temp_input, 'wb') as f:
+        # Save uploaded file temporarily
+        progress.progress(20, text="📦 Preparing file...")
+        with open(temp_csv, 'wb') as f:
             f.write(file.getvalue())
         
-        progress_bar.progress(30)
-        status_text.text("🔄 Converting to optimized format...")
+        progress.progress(40, text="💾 Converting with DuckDB...")
         
-        # Create DuckDB connection
+        # Use DuckDB to convert directly - handles any size file
         con = duckdb.connect(':memory:')
         
-        if file_type == 'csv':
-            # Read CSV with auto-detection
-            query = f"""
-                COPY (
-                    SELECT * FROM read_csv_auto(
-                        '{temp_input}',
-                        sample_size=-1,
-                        ignore_errors=true,
-                        normalize_names=true,
-                        header=true
-                    )
-                ) TO '{parquet_path}' (FORMAT PARQUET, COMPRESSION SNAPPY)
-            """
-            con.execute(query)
-            
-        elif file_type == 'xlsx':
-            # Read Excel with pandas then convert
-            df = pd.read_excel(temp_input, engine='openpyxl')
-            # Normalize column names
-            df.columns = df.columns.str.strip().str.replace(' ', '_').str.replace('[^a-zA-Z0-9_]', '', regex=True)
-            con.register('temp_table', df)
-            con.execute(f"COPY temp_table TO '{parquet_path}' (FORMAT PARQUET, COMPRESSION SNAPPY)")
-            
-        elif file_type == 'parquet':
-            # Already parquet, just copy
-            import shutil
-            shutil.copy(temp_input, parquet_path)
+        match file_type:
+            case 'csv' | 'txt':
+                # DuckDB auto-detects CSV format
+                con.execute(f"""
+                    COPY (SELECT * FROM read_csv_auto('{temp_csv}', 
+                                                       sample_size=-1,
+                                                       ignore_errors=true))
+                    TO '{parquet_path}' (FORMAT PARQUET, COMPRESSION SNAPPY)
+                """)
+                
+            case 'xlsx' | 'xls':
+                # For Excel, read with pandas then let DuckDB handle it
+                df = pd.read_excel(file, engine='openpyxl' if file_type == 'xlsx' else 'xlrd')
+                con.register('temp_table', df)
+                con.execute(f"COPY temp_table TO '{parquet_path}' (FORMAT PARQUET, COMPRESSION SNAPPY)")
+                
+            case 'parquet':
+                # Already parquet, just copy
+                with open(parquet_path, 'wb') as f:
+                    f.write(file.getvalue())
+                con.execute(f"SELECT COUNT(*) as cnt FROM parquet_scan('{parquet_path}')")
+                row_count = con.fetchone()[0]
+                con.execute(f"SELECT * FROM parquet_scan('{parquet_path}') LIMIT 1")
+                col_count = len(con.fetchone())
+                con.close()
+                
+                # Cleanup
+                if os.path.exists(temp_csv):
+                    os.remove(temp_csv)
+                
+                progress.progress(100, text="✅ File ready!")
+                time.sleep(0.5)
+                progress.empty()
+                return parquet_path, row_count, col_count
+                
+            case _:
+                raise ValueError(f"Unsupported file type: {file_type}")
         
-        progress_bar.progress(70)
-        status_text.text("📊 Analyzing data...")
+        progress.progress(80, text="📊 Getting file info...")
         
         # Get row and column counts
-        row_count = con.execute(f"SELECT COUNT(*) FROM parquet_scan('{parquet_path}')").fetchone()[0]
-        col_count = len(con.execute(f"SELECT * FROM parquet_scan('{parquet_path}') LIMIT 1").description)
+        con.execute(f"SELECT COUNT(*) as cnt FROM parquet_scan('{parquet_path}')")
+        row_count = con.fetchone()[0]
+        
+        con.execute(f"SELECT * FROM parquet_scan('{parquet_path}') LIMIT 1")
+        result = con.fetchone()
+        col_count = len(result) if result else 0
         
         con.close()
         
         # Cleanup temp file
-        if os.path.exists(temp_input):
-            os.remove(temp_input)
+        if os.path.exists(temp_csv):
+            os.remove(temp_csv)
         
-        progress_bar.progress(100)
-        status_text.text("✅ File loaded successfully!")
+        progress.progress(100, text="✅ Conversion complete!")
         time.sleep(0.5)
-        progress_bar.empty()
-        status_text.empty()
+        progress.empty()
         
         return parquet_path, row_count, col_count
         
     except Exception as e:
-        progress_bar.empty()
-        status_text.empty()
-        st.error(f"❌ Error loading file: {str(e)}")
-        if os.path.exists(temp_input):
-            os.remove(temp_input)
+        st.error(f"❌ Error converting file: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+        
+        # Cleanup on error
+        if os.path.exists(temp_csv):
+            os.remove(temp_csv)
+        
         return None, 0, 0
 
-def get_duckdb_con():
-    """Get or create DuckDB connection - FIXED to check key existence"""
-    if 'duckdb_con' not in st.session_state or st.session_state.duckdb_con is None:
+def initialize_duckdb():
+    """Initialize DuckDB connection"""
+    if st.session_state.duckdb_con is None:
         st.session_state.duckdb_con = duckdb.connect(':memory:')
     return st.session_state.duckdb_con
 
-def get_column_stats(con, parquet_path: str) -> Dict:
-    """Get column statistics and types"""
+def get_column_stats(con, parquet_path: str) -> dict:
+    """Get comprehensive column statistics using DuckDB"""
     try:
-        schema = con.execute(f"SELECT * FROM parquet_scan('{parquet_path}') LIMIT 0").description
-        column_info = {}
+        query = f"SELECT * FROM parquet_scan('{parquet_path}') LIMIT 0"
+        schema = con.execute(query).description
         
+        column_info = {}
         for col_name, col_type, *_ in schema:
-            stats = con.execute(f"""
-                SELECT 
-                    COUNT(*) as total,
-                    COUNT(DISTINCT "{col_name}") as distinct_count,
-                    COUNT(*) - COUNT("{col_name}") as null_count
-                FROM parquet_scan('{parquet_path}')
-            """).fetchone()
+            stats_query = f"""
+            SELECT 
+                COUNT(*) as total,
+                COUNT(DISTINCT "{col_name}") as distinct_count,
+                COUNT(*) - COUNT("{col_name}") as null_count
+            FROM parquet_scan('{parquet_path}')
+            """
+            stats = con.execute(stats_query).fetchone()
             
             column_info[col_name] = {
                 'type': str(col_type),
@@ -430,931 +421,1287 @@ def get_column_stats(con, parquet_path: str) -> Dict:
         
         return column_info
     except Exception as e:
-        st.error(f"Error analyzing columns: {str(e)}")
+        st.error(f"Error getting column stats: {e}")
         return {}
 
-def detect_anomalies_statistical(con, parquet_path: str, cols: List[str], method: str, threshold: float) -> Optional[pd.DataFrame]:
-    """Statistical anomaly detection using DuckDB SQL - COMPLETELY FIXED"""
-    df = None
+def get_sample_data(con, parquet_path: str, limit: int = 1000) -> pd.DataFrame:
+    """Get sample data for preview"""
+    query = f"SELECT * FROM parquet_scan('{parquet_path}') LIMIT {limit}"
+    return con.execute(query).df()
+
+def explain_contamination(rate: float, total_records: int) -> str:
+    """Generate user-friendly explanation of contamination rate"""
+    expected_anomalies = int(total_records * rate)
+    
+    if rate <= 0.01:
+        sensitivity = "very strict"
+        use_case = "credit card fraud, critical systems"
+    elif rate <= 0.05:
+        sensitivity = "strict"
+        use_case = "financial transactions, quality control"
+    elif rate <= 0.10:
+        sensitivity = "balanced"
+        use_case = "general business data, customer behavior"
+    elif rate <= 0.20:
+        sensitivity = "lenient"
+        use_case = "exploratory analysis, noisy data"
+    else:
+        sensitivity = "very lenient"
+        use_case = "highly variable data"
+    
+    return f"""
+    **What this means:** This is your **sensitivity guide**. The algorithm will use ~**{expected_anomalies:,}** 
+    as a reference point ({rate*100:.1f}%), but can find MORE or FEWER anomalies based on actual data patterns.
+    
+    **Sensitivity:** {sensitivity.title()} - typical for {use_case}
+    
+    **💡 How it works:** The algorithm calculates anomaly scores for ALL records, then uses this rate to set 
+    an intelligent threshold. Records scoring significantly above this threshold are flagged as anomalies.
+    
+    **Key difference:** Unlike the old version, this won't force exactly {rate*100:.1f}% to be anomalies - 
+    it discovers what's genuinely unusual in your data.
+    """
+
+# =============================================================================
+# ANOMALY DETECTION ENGINE (FACTORY PATTERN)
+# =============================================================================
+
+# Detection methods configuration
+DETECTION_METHODS = {
+    'isolation_forest': {
+        'class': IsolationForest,
+        'params': {'contamination': 'auto', 'random_state': 42, 'n_jobs': -1},
+        'type': 'ml'
+    },
+    'lof': {
+        'class': LocalOutlierFactor,
+        'params': {'n_neighbors': 20, 'contamination': 'auto', 'n_jobs': -1},
+        'type': 'ml'
+    },
+    'one_class_svm': {
+        'class': OneClassSVM,
+        'params': {'nu': 0.1, 'kernel': 'rbf', 'gamma': 'auto'},
+        'type': 'ml'
+    },
+}
+
+def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, method: str = 'zscore', threshold: float = 3) -> pd.DataFrame | None:
+    """SQL-based statistical anomaly detection"""
     try:
         if method == 'zscore':
-            zscore_parts = [f'ABS(("{col}" - AVG("{col}") OVER ()) / NULLIF(STDDEV("{col}") OVER (), 0)) as zscore_{col}' 
-                           for col in cols]
-            query = f"""
-                SELECT *, 
-                    {', '.join(zscore_parts)},
-                    GREATEST({', '.join([f'COALESCE(zscore_{col}, 0)' for col in cols])}) as max_score
-                FROM parquet_scan('{parquet_path}')
-            """
-            df = con.execute(query).df()
-            df['anomaly'] = (df['max_score'] > threshold).astype(int)
-            df['anomaly_score'] = df['max_score']
+            select_parts = [f"""
+                ABS(("{col}" - AVG("{col}") OVER ()) / NULLIF(STDDEV("{col}") OVER (), 0)) as zscore_{col}
+            """ for col in numeric_cols]
             
-        elif method == 'iqr':
-            # Get percentiles for each column
+            query = f"""
+            SELECT *, 
+                {', '.join(select_parts)},
+                GREATEST({', '.join([f'zscore_{col}' for col in numeric_cols])}) as max_zscore
+            FROM parquet_scan('{parquet_path}')
+            """
+            
+            df = con.execute(query).df()
+            df['anomaly'] = (df['max_zscore'] > threshold).astype(int)
+            df['anomaly_score'] = df['max_zscore']
+            
+        else:  # IQR method
             percentiles = {}
-            for col in cols:
-                result = con.execute(f"""
-                    SELECT 
-                        quantile_cont("{col}", 0.25) as q1,
-                        quantile_cont("{col}", 0.75) as q3
-                    FROM parquet_scan('{parquet_path}')
-                    WHERE "{col}" IS NOT NULL
-                """).fetchone()
-                q1, q3 = result[0], result[1]
+            for col in numeric_cols:
+                pct_query = f"""
+                SELECT 
+                    percentile_cont(0.25) WITHIN GROUP (ORDER BY "{col}") as q1,
+                    percentile_cont(0.75) WITHIN GROUP (ORDER BY "{col}") as q3
+                FROM parquet_scan('{parquet_path}')
+                WHERE "{col}" IS NOT NULL
+                """
+                q1, q3 = con.execute(pct_query).fetchone()
                 iqr = q3 - q1
                 percentiles[col] = {'lower': q1 - 1.5 * iqr, 'upper': q3 + 1.5 * iqr}
             
-            # Load full data
-            query = f"SELECT * FROM parquet_scan('{parquet_path}')"
+            conditions = [f'("{col}" < {percentiles[col]["lower"]} OR "{col}" > {percentiles[col]["upper"]})' 
+                         for col in numeric_cols]
+            
+            query = f"""
+            SELECT *,
+                CASE WHEN {' OR '.join(conditions)} THEN 1 ELSE 0 END as anomaly
+            FROM parquet_scan('{parquet_path}')
+            """
+            
             df = con.execute(query).df()
             
-            # Add anomaly flag based on IQR bounds
-            df['anomaly'] = 0
-            for col in cols:
-                lower, upper = percentiles[col]['lower'], percentiles[col]['upper']
-                df.loc[(df[col] < lower) | (df[col] > upper), 'anomaly'] = 1
-            
-            # Calculate anomaly scores
+            # Calculate anomaly score
             scores = []
-            for col in cols:
+            for col in numeric_cols:
                 lower, upper = percentiles[col]['lower'], percentiles[col]['upper']
                 score = np.maximum(np.maximum(lower - df[col], 0), np.maximum(df[col] - upper, 0))
                 scores.append(score)
-            df['anomaly_score'] = np.max(scores, axis=0) if scores else 0
             
-        elif method == 'mad':
-            # FIXED: Calculate median and MAD separately to avoid nested aggregates
-            mad_values = {}
-            for col in cols:
-                # First get median
-                median_result = con.execute(f"""
-                    SELECT median("{col}") as med
-                    FROM parquet_scan('{parquet_path}')
-                    WHERE "{col}" IS NOT NULL
-                """).fetchone()
-                median_val = median_result[0]
-                
-                # Then calculate MAD using the median value
-                mad_result = con.execute(f"""
-                    SELECT median(ABS("{col}" - {median_val})) as mad_val
-                    FROM parquet_scan('{parquet_path}')
-                    WHERE "{col}" IS NOT NULL
-                """).fetchone()
-                mad_val = mad_result[0]
-                
-                mad_values[col] = {
-                    'median': median_val, 
-                    'mad': mad_val if mad_val and mad_val > 0 else 1
-                }
-            
-            # Build query with pre-calculated values
-            mad_parts = [f'ABS(("{col}" - {mad_values[col]["median"]}) / ({mad_values[col]["mad"]} * 1.4826)) as mad_{col}' 
-                        for col in cols]
-            query = f"""
-                SELECT *, 
-                    {', '.join(mad_parts)},
-                    GREATEST({', '.join([f'COALESCE(mad_{col}, 0)' for col in cols])}) as max_score
-                FROM parquet_scan('{parquet_path}')
-            """
-            df = con.execute(query).df()
-            df['anomaly'] = (df['max_score'] > threshold).astype(int)
-            df['anomaly_score'] = df['max_score']
+            df['anomaly_score'] = np.max(scores, axis=0)
         
         return df
-        
     except Exception as e:
-        st.error(f"Statistical detection error: {str(e)}")
-        import traceback
-        st.error(f"Traceback: {traceback.format_exc()}")
+        st.error(f"Error in statistical detection: {e}")
         return None
 
-def detect_anomalies_ml(df: pd.DataFrame, cols: List[str], method: str, contamination: float) -> Optional[pd.DataFrame]:
-    """Machine learning anomaly detection"""
+def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, contamination: float = 0.1) -> tuple[pd.DataFrame | None, dict]:
+    """ML-based anomaly detection using score-based thresholding instead of hard contamination constraint
+    
+    KEY IMPROVEMENT: contamination is now a GUIDE, not a hard constraint. The algorithm:
+    1. Trains on all data to learn normal patterns
+    2. Calculates anomaly scores for every record
+    3. Uses contamination to set an intelligent threshold
+    4. Flags records that score SIGNIFICANTLY above threshold
+    5. Can find MORE or FEWER anomalies than expected based on actual data
+    """
     try:
-        df_clean = df.copy()
-        
         # Handle missing values
-        for col in cols:
-            if col in df_clean.columns:
-                df_clean[col] = df_clean[col].fillna(df_clean[col].median())
+        df_clean = df.copy()
+        for col in numeric_cols:
+            df_clean[col] = df_clean[col].fillna(df_clean[col].median())
         
-        # Prepare features
-        X = df_clean[cols].values
+        # Prepare and scale features
+        X = df_clean[numeric_cols].values
         X_scaled = StandardScaler().fit_transform(X)
         
-        # Select model
-        models = {
-            'isolation_forest': IsolationForest(contamination=contamination, random_state=42, n_jobs=-1, max_samples=256),
-            'lof': LocalOutlierFactor(n_neighbors=min(20, len(df_clean)-1), contamination=contamination, n_jobs=-1),
-            'one_class_svm': OneClassSVM(nu=contamination, kernel='rbf', gamma='auto'),
-            'elliptic_envelope': EllipticEnvelope(contamination=contamination, random_state=42)
+        # Get model configuration
+        config = DETECTION_METHODS[method]
+        model_class = config['class']
+        params = config['params'].copy()
+        
+        # Adjust LOF n_neighbors for small datasets
+        if method == 'lof':
+            params['n_neighbors'] = min(params['n_neighbors'], len(df_clean) - 1)
+        
+        # Train models WITHOUT hard contamination constraint
+        if method == 'isolation_forest':
+            # Use contamination as hint but get raw scores
+            params['contamination'] = contamination
+            model = model_class(**params)
+            model.fit(X_scaled)
+            scores = model.score_samples(X_scaled)
+            # Higher negative scores = more anomalous, convert to positive
+            anomaly_scores = -scores
+            
+        elif method == 'lof':
+            # LOF requires contamination, but we'll override with scores
+            params['contamination'] = contamination
+            params['novelty'] = False
+            model = model_class(**params)
+            model.fit(X_scaled)
+            scores = model.negative_outlier_factor_
+            # More negative = more anomalous
+            anomaly_scores = -scores
+            
+        elif method == 'one_class_svm':
+            # Train without nu constraint, use decision function
+            params_train = params.copy()
+            params_train.pop('nu', None)
+            model = model_class(nu=0.5, **params_train)  # Use neutral nu for training
+            model.fit(X_scaled)
+            scores = model.decision_function(X_scaled)
+            # More negative = more anomalous
+            anomaly_scores = -scores
+        
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        
+        # Normalize scores to 0-10 scale for consistency
+        score_min, score_max = anomaly_scores.min(), anomaly_scores.max()
+        if score_max > score_min:
+            normalized_scores = 10 * (anomaly_scores - score_min) / (score_max - score_min)
+        else:
+            normalized_scores = np.zeros_like(anomaly_scores)
+        
+        # Use contamination as GUIDE to set threshold, not hard constraint
+        # Calculate threshold based on expected percentile
+        threshold_percentile = (1 - contamination) * 100
+        score_threshold = np.percentile(normalized_scores, threshold_percentile)
+        
+        # Apply intelligent thresholding: flag if score significantly above threshold
+        # Use 1.2x threshold as buffer to focus on truly extreme cases
+        adaptive_threshold = max(score_threshold * 1.2, 6.0)  # Minimum threshold of 6.0
+        
+        df_clean['anomaly'] = (normalized_scores > adaptive_threshold).astype(int)
+        df_clean['anomaly_score'] = normalized_scores
+        
+        # Store detection metadata in session state (df.attrs breaks parquet export)
+        expected_count = int(len(df_clean) * contamination)
+        actual_count = df_clean['anomaly'].sum()
+        
+        return df_clean, {
+            'expected_anomalies': expected_count,
+            'actual_anomalies': actual_count,
+            'threshold_used': adaptive_threshold
+        }
+    except Exception as e:
+        st.error(f"Error in ML detection: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+        return None, {}
+
+# =============================================================================
+# INSIGHTS & VISUALIZATIONS
+# =============================================================================
+
+def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: list, method: str) -> dict:
+    """Generate comprehensive insights"""
+    try:
+        total = len(df)
+        anomalies = df['anomaly'].sum()
+        pct = (anomalies / total * 100) if total > 0 else 0
+        
+        insights = {
+            'total_records': total,
+            'anomalies': anomalies,
+            'anomaly_rate': pct,
+            'method': method,
+            'categorical_insights': {}
         }
         
-        model = models[method]
-        predictions = model.fit_predict(X_scaled)
+        # Add detection metadata from session state if available
+        if 'detection_metadata' in st.session_state:
+            metadata = st.session_state.detection_metadata
+            insights['expected_anomalies'] = metadata.get('expected_anomalies', None)
+            insights['threshold_used'] = metadata.get('threshold_used', None)
         
-        # Get scores
-        if hasattr(model, 'score_samples'):
-            scores = model.score_samples(X_scaled)
-        elif hasattr(model, 'negative_outlier_factor_'):
-            scores = model.negative_outlier_factor_
-        else:
-            scores = predictions.astype(float)
+        # Category-level analysis
+        if categorical_cols:
+            for categorical_col in categorical_cols:
+                if categorical_col in df.columns:
+                    grp = df.groupby(categorical_col)['anomaly'].agg(['sum', 'count']).reset_index()
+                    grp.columns = [categorical_col, 'anomaly_count', 'total_count']
+                    grp['anomaly_rate'] = (grp['anomaly_count'] / grp['total_count'] * 100)
+                    grp = grp.sort_values('anomaly_rate', ascending=False)
+                    
+                    insights['categorical_insights'][categorical_col] = {
+                        'top_categories': grp.head(10).to_dict('records'),
+                        'highest_rate': grp.iloc[0].to_dict() if len(grp) > 0 else None
+                    }
         
-        df_clean['anomaly'] = (predictions == -1).astype(int)
-        df_clean['anomaly_score'] = np.abs(scores)
-        df_clean['confidence_percentile'] = pd.Series(df_clean['anomaly_score']).rank(pct=True) * 100
+        # Feature importance
+        if numeric_cols:
+            anomaly_df = df[df['anomaly'] == 1]
+            normal_df = df[df['anomaly'] == 0]
+            
+            feature_stats = {}
+            for col in numeric_cols:
+                if col in df.columns:
+                    feature_stats[col] = {
+                        'anomaly_mean': anomaly_df[col].mean(),
+                        'normal_mean': normal_df[col].mean(),
+                        'anomaly_std': anomaly_df[col].std(),
+                        'difference': abs(anomaly_df[col].mean() - normal_df[col].mean())
+                    }
+            
+            insights['feature_importance'] = feature_stats
         
-        return df_clean
+        # Top anomalies
+        if 'anomaly_score' in df.columns:
+            top_anomalies = df.nlargest(5, 'anomaly_score')
+            insights['top_anomalies'] = top_anomalies.to_dict('records')
         
+        return insights
     except Exception as e:
-        st.error(f"ML detection error: {str(e)}")
-        return None
+        st.error(f"Error generating insights: {e}")
+        return {}
 
-def create_visualizations(df: pd.DataFrame, numeric_cols: List[str], cat_cols: List[str], date_col: Optional[str]) -> Dict:
+def generate_narrative(insights: dict, categorical_cols: list, numeric_cols: list, expected_rate: float = None) -> str:
+    """Generate rich narrative summary of results"""
+    total = insights['total_records']
+    anomalies = insights['anomalies']
+    rate = insights['anomaly_rate']
+    method = insights['method']
+    
+    # Executive summary
+    narrative = f"""
+    ### 📊 ANALYSIS SUMMARY
+    
+    Your dataset contains **{total:,} records** analyzed using **{method}**.
+    
+    #### 🎯 THE VERDICT
+    """
+    
+    # Show expected vs actual if available
+    if expected_rate and anomalies > 0:
+        expected_pct = expected_rate * 100
+        expected_count = insights.get('expected_anomalies', int(total * expected_rate))
+        diff = rate - expected_pct
+        
+        narrative += f"""
+    **Expected:** ~{expected_count:,} anomalies ({expected_pct:.1f}%)  
+    **Found:** {anomalies:,} anomalies ({rate:.2f}%)
+    """
+        
+        if abs(diff) < 1:
+            verdict = f"✓ **Right on target** - The data matches your expectations. The algorithm found genuine anomalies at the anticipated rate."
+        elif diff > 2:
+            verdict = f"⚠️ **More than expected** - Found {anomalies - expected_count:,} additional anomalies ({diff:+.1f}%). Your data has more unusual patterns than anticipated - investigate these carefully."
+        else:
+            verdict = f"✓ **Cleaner than expected** - Found {expected_count - anomalies:,} fewer anomalies ({diff:.1f}%). Your data quality is better than anticipated."
+    else:
+        if rate < 1:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - a very clean dataset!"
+        elif rate < 5:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - typical for quality data."
+        elif rate < 10:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - moderate anomaly presence."
+        else:
+            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - significant anomaly presence, investigate patterns."
+    
+    narrative += f"\n{verdict}\n"
+    
+    # Threshold info if available
+    if 'threshold_used' in insights:
+        threshold = insights['threshold_used']
+        narrative += f"\n**Detection threshold:** {threshold:.2f} (on 0-10 scale)\n"
+    
+    # Top finding - feature importance
+    if 'feature_importance' in insights and insights['feature_importance']:
+        top_feature = max(insights['feature_importance'].items(), key=lambda x: x[1]['difference'])
+        feature_name = top_feature[0]
+        stats = top_feature[1]
+        ratio = stats['anomaly_mean'] / stats['normal_mean'] if stats['normal_mean'] != 0 else 0
+        
+        narrative += f"""
+    #### 🔥 TOP FINDING
+    **'{feature_name}'** is your biggest red flag - anomalies average **{stats['anomaly_mean']:,.2f}** while normal 
+    records are around **{stats['normal_mean']:,.2f}**. That's a **{ratio:.1f}x difference**.
+    """
+    
+    # Where to look - categorical insights
+    if 'categorical_insights' in insights and insights['categorical_insights']:
+        for cat_col, cat_data in insights['categorical_insights'].items():
+            if cat_data['highest_rate']:
+                highest = cat_data['highest_rate']
+                cat_name = highest.get(cat_col, 'Unknown')
+                cat_rate = highest.get('anomaly_rate', 0)
+                cat_count = highest.get('anomaly_count', 0)
+                
+                if cat_rate > rate * 2:  # Significantly higher than average
+                    narrative += f"""
+    #### ⚠️ WHERE TO LOOK
+    **'{cat_col}' = '{cat_name}'** shows **{cat_rate:.1f}%** anomaly rate (vs {rate:.2f}% overall) with **{cat_count:,} flagged records**. 
+    Start your investigation here.
+    """
+                    break
+    
+    return narrative
+
+def create_metric_card(label: str, value: str | int) -> str:
+    """Generate HTML for metric card"""
+    return f"""
+    <div class="metric-card">
+        <div class="metric-label">{label}</div>
+        <div class="metric-value">{value}</div>
+    </div>
+    """
+
+def get_chart_narrative(chart_type: str, insights: dict = None) -> str:
+    """Generate educational narrative for each visualization"""
+    narratives = {
+        'pie': """
+        **📊 Distribution Overview**
+        
+        This shows your overall split. The **RED slice** represents records that don't fit the normal pattern - 
+        these are your outliers. If this slice is tiny (<1%), you have a clean dataset. If it's large (>10%), 
+        either your data has quality issues OR the normal pattern is very diverse.
+        """,
+        
+        'histogram': """
+        **📈 Anomaly Score Distribution**
+        
+        Anomaly scores are like 'weirdness ratings'. Records on the **RIGHT side** (high scores) are the most 
+        unusual - prioritize investigating these first. The tall bar on the left shows your normal data 
+        clustered together.
+        
+        💡 **Tip:** Focus on records with scores >7.0 for immediate action.
+        """,
+        
+        'timeseries': """
+        **⏰ Timeline Analysis**
+        
+        This timeline reveals **WHEN** anomalies happen. Spikes indicate problem periods - maybe a system glitch, 
+        fraud attack, or seasonal pattern. Look for:
+        - Sudden spikes (incidents)
+        - Gradual increases (trend changes)
+        - Weekly/monthly patterns (seasonality)
+        """,
+        
+        'scatter': """
+        **🔍 Feature Relationship**
+        
+        Each dot is a record. **RED dots** far from the GREEN cluster are your outliers. If you see a RED cluster, 
+        that's a pattern worth naming - maybe 'high-value-low-frequency' transactions.
+        
+        💡 **Tip:** Outliers in the corners are the most extreme cases.
+        """,
+        
+        'category': """
+        **📋 Category Rankings**
+        
+        This ranks categories by anomaly concentration. Categories at the **top** deserve immediate attention. 
+        If one category has 5x the average rate, that's not random - investigate the relationship.
+        """,
+        
+        'boxplot': """
+        **📦 Distribution Comparison**
+        
+        Box plots show the spread of values. **RED boxes** (anomalies) shifted away from **GREEN boxes** (normal) 
+        indicate that feature is a strong discriminator. Overlapping boxes mean that feature isn't helpful for detection.
+        """
+    }
+    
+    return narratives.get(chart_type, "")
+
+def create_visualizations(df: pd.DataFrame, numeric_cols: list, categorical_cols: list = None, date_col: str = None) -> dict:
     """Create comprehensive visualizations"""
     figs = {}
+    colors_scheme = {'normal': '#10b981', 'anomaly': '#ef4444'}
     
     try:
-        # Distribution pie chart
-        anom_counts = df['anomaly'].value_counts()
-        colors = ['#10b981', '#ef4444']
+        # 1. Anomaly Distribution Pie
+        anomaly_counts = df['anomaly'].value_counts()
         fig_pie = go.Figure(data=[go.Pie(
             labels=['Normal', 'Anomaly'],
-            values=[anom_counts.get(0, 0), anom_counts.get(1, 0)],
+            values=[anomaly_counts.get(0, 0), anomaly_counts.get(1, 0)],
             hole=0.4,
-            marker=dict(colors=colors, line=dict(color='white', width=2)),
-            textfont=dict(size=16, color='white', family='Inter'),
-            hovertemplate='<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>'
+            marker=dict(colors=[colors_scheme['normal'], colors_scheme['anomaly']]),
+            textinfo='label+percent',
+            textfont=dict(size=14, color='white')
         )])
         fig_pie.update_layout(
-            title=dict(text="Anomaly Distribution", font=dict(size=20, family='Inter', color='#2d3748')),
+            title=dict(text="Anomaly Distribution", font=dict(size=18, color='#1e293b')),
+            template="plotly_white",
             height=400,
-            showlegend=True,
-            legend=dict(font=dict(size=14)),
-            margin=dict(l=20, r=20, t=60, b=20),
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)'
+            showlegend=True
         )
         figs['pie'] = fig_pie
         
-        # Score histogram
+        # 2. Anomaly Score Distribution
         if 'anomaly_score' in df.columns:
-            fig_hist = go.Figure()
-            
-            # Normal distribution
-            normal_scores = df[df['anomaly'] == 0]['anomaly_score']
-            fig_hist.add_trace(go.Histogram(
-                x=normal_scores,
-                name='Normal',
-                marker_color='#10b981',
-                opacity=0.7,
-                nbinsx=40
-            ))
-            
-            # Anomaly distribution
-            anom_scores = df[df['anomaly'] == 1]['anomaly_score']
-            fig_hist.add_trace(go.Histogram(
-                x=anom_scores,
-                name='Anomaly',
-                marker_color='#ef4444',
-                opacity=0.7,
-                nbinsx=40
-            ))
-            
-            fig_hist.update_layout(
-                title=dict(text="Anomaly Score Distribution", font=dict(size=20, family='Inter', color='#2d3748')),
-                xaxis_title="Anomaly Score",
-                yaxis_title="Count",
-                height=400,
-                barmode='overlay',
-                hovermode='x unified',
-                legend=dict(font=dict(size=14)),
-                margin=dict(l=40, r=20, t=60, b=40),
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)'
+            fig_hist = px.histogram(
+                df, x='anomaly_score', color='anomaly',
+                nbins=50,
+                title="Anomaly Score Distribution",
+                labels={'anomaly_score': 'Anomaly Score', 'count': 'Frequency'},
+                color_discrete_map={0: colors_scheme['normal'], 1: colors_scheme['anomaly']}
             )
+            fig_hist.update_layout(template="plotly_white", height=400)
             figs['histogram'] = fig_hist
         
-        # Timeline
+        # 3. Time Series (if date column exists)
         if date_col and date_col in df.columns:
             try:
-                df_time = df.copy()
-                df_time[date_col] = pd.to_datetime(df_time[date_col], errors='coerce')
-                df_time = df_time.dropna(subset=[date_col]).sort_values(date_col)
+                if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+                    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
                 
-                if len(df_time) > 0:
-                    time_agg = df_time.groupby(pd.Grouper(key=date_col, freq='D'))['anomaly'].agg(['sum', 'count']).reset_index()
-                    time_agg['anomaly_rate'] = (time_agg['sum'] / time_agg['count'] * 100).fillna(0)
-                    
-                    fig_ts = go.Figure()
-                    fig_ts.add_trace(go.Scatter(
-                        x=time_agg[date_col],
-                        y=time_agg['sum'],
-                        mode='lines+markers',
-                        name='Anomaly Count',
-                        line=dict(color='#ef4444', width=3),
-                        marker=dict(size=8),
-                        fill='tozeroy',
-                        fillcolor='rgba(239, 68, 68, 0.2)',
-                        hovertemplate='<b>Date</b>: %{x}<br><b>Anomalies</b>: %{y}<extra></extra>'
-                    ))
-                    
-                    fig_ts.update_layout(
-                        title=dict(text="Anomaly Timeline", font=dict(size=20, family='Inter', color='#2d3748')),
-                        xaxis_title="Date",
-                        yaxis_title="Anomaly Count",
-                        height=400,
-                        hovermode='x unified',
-                        margin=dict(l=40, r=20, t=60, b=40),
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)'
-                    )
-                    figs['timeline'] = fig_ts
-            except:
-                pass
+                df_sorted = df.sort_values(date_col)
+                daily_stats = df_sorted.groupby(pd.Grouper(key=date_col, freq='D')).agg({
+                    'anomaly': ['sum', 'count']
+                }).reset_index()
+                daily_stats.columns = [date_col, 'anomalies', 'total']
+                daily_stats['anomaly_rate'] = (daily_stats['anomalies'] / daily_stats['total'] * 100).fillna(0)
+                
+                fig_time = make_subplots(specs=[[{"secondary_y": True}]])
+                
+                fig_time.add_trace(
+                    go.Scatter(x=daily_stats[date_col], y=daily_stats['anomalies'],
+                              name="Anomaly Count", line=dict(color=colors_scheme['anomaly'], width=2),
+                              fill='tozeroy'),
+                    secondary_y=False,
+                )
+                
+                fig_time.add_trace(
+                    go.Scatter(x=daily_stats[date_col], y=daily_stats['anomaly_rate'],
+                              name="Anomaly Rate (%)", line=dict(color='#f59e0b', width=2, dash='dash')),
+                    secondary_y=True,
+                )
+                
+                fig_time.update_layout(
+                    title="Anomalies Over Time",
+                    template="plotly_white",
+                    height=400,
+                    hovermode='x unified'
+                )
+                fig_time.update_xaxes(title_text="Date")
+                fig_time.update_yaxes(title_text="Anomaly Count", secondary_y=False)
+                fig_time.update_yaxes(title_text="Anomaly Rate (%)", secondary_y=True)
+                
+                figs['timeseries'] = fig_time
+            except Exception as e:
+                st.warning(f"Could not create time series chart: {e}")
         
-        # Feature scatter plot
+        # 4. Scatter Plot (if 2+ numeric columns)
         if len(numeric_cols) >= 2:
-            sample_df = df.sample(min(2000, len(df))) if len(df) > 2000 else df
-            
-            fig_scatter = go.Figure()
-            
-            # Normal points
-            normal_data = sample_df[sample_df['anomaly'] == 0]
-            fig_scatter.add_trace(go.Scatter(
-                x=normal_data[numeric_cols[0]],
-                y=normal_data[numeric_cols[1]],
-                mode='markers',
-                name='Normal',
-                marker=dict(color='#10b981', size=8, opacity=0.6, line=dict(width=0)),
-                hovertemplate=f'<b>{numeric_cols[0]}</b>: %{{x}}<br><b>{numeric_cols[1]}</b>: %{{y}}<extra></extra>'
-            ))
-            
-            # Anomaly points
-            anom_data = sample_df[sample_df['anomaly'] == 1]
-            fig_scatter.add_trace(go.Scatter(
-                x=anom_data[numeric_cols[0]],
-                y=anom_data[numeric_cols[1]],
-                mode='markers',
-                name='Anomaly',
-                marker=dict(color='#ef4444', size=10, opacity=0.8, 
-                          line=dict(width=1, color='white'),
-                          symbol='diamond'),
-                hovertemplate=f'<b>{numeric_cols[0]}</b>: %{{x}}<br><b>{numeric_cols[1]}</b>: %{{y}}<extra></extra>'
-            ))
-            
-            fig_scatter.update_layout(
-                title=dict(text=f"{numeric_cols[0]} vs {numeric_cols[1]}", font=dict(size=20, family='Inter', color='#2d3748')),
-                xaxis_title=numeric_cols[0],
-                yaxis_title=numeric_cols[1],
-                height=500,
-                hovermode='closest',
-                legend=dict(font=dict(size=14)),
-                margin=dict(l=40, r=20, t=60, b=40),
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)'
+            sample_df = df.sample(min(10000, len(df)))
+            fig_scatter = px.scatter(
+                sample_df,
+                x=numeric_cols[0],
+                y=numeric_cols[1],
+                color='anomaly',
+                hover_data=numeric_cols[:5] if len(numeric_cols) > 2 else numeric_cols,
+                title=f"{numeric_cols[0]} vs {numeric_cols[1]}",
+                color_discrete_map={0: colors_scheme['normal'], 1: colors_scheme['anomaly']},
+                opacity=0.6
             )
+            fig_scatter.update_layout(template="plotly_white", height=500)
             figs['scatter'] = fig_scatter
         
-        # Box plots for features
-        if len(numeric_cols) > 0:
-            fig_box = go.Figure()
-            
-            for col in numeric_cols[:4]:
-                if col in df.columns:
-                    # Normal box
-                    fig_box.add_trace(go.Box(
-                        y=df[df['anomaly'] == 0][col],
-                        name=f'{col} (Normal)',
-                        marker_color='#10b981',
-                        boxmean='sd'
-                    ))
+        # 5. Category Analysis
+        if categorical_cols:
+            for i, categorical_col in enumerate(categorical_cols[:3]):
+                if categorical_col in df.columns:
+                    grp = df.groupby(categorical_col)['anomaly'].agg(['sum', 'count']).reset_index()
+                    grp.columns = [categorical_col, 'anomaly_count', 'total_count']
+                    grp['anomaly_rate'] = (grp['anomaly_count'] / grp['total_count'] * 100)
+                    grp = grp.sort_values('anomaly_rate', ascending=False).head(15)
                     
-                    # Anomaly box
-                    fig_box.add_trace(go.Box(
-                        y=df[df['anomaly'] == 1][col],
-                        name=f'{col} (Anomaly)',
-                        marker_color='#ef4444',
-                        boxmean='sd'
-                    ))
+                    fig_bar = px.bar(
+                        grp,
+                        x=categorical_col,
+                        y='anomaly_rate',
+                        title=f"Top 15 {categorical_col} by Anomaly Rate",
+                        labels={'anomaly_rate': 'Anomaly Rate (%)'},
+                        color='anomaly_rate',
+                        color_continuous_scale='Reds'
+                    )
+                    fig_bar.update_layout(template="plotly_white", height=400)
+                    figs[f'category_bar_{i}'] = fig_bar
+        
+        # 6. Box plots
+        if numeric_cols:
+            fig_box = make_subplots(
+                rows=1, cols=min(3, len(numeric_cols)),
+                subplot_titles=numeric_cols[:3]
+            )
+            
+            for i, col in enumerate(numeric_cols[:3], 1):
+                for anomaly_val, color in [(0, colors_scheme['normal']), (1, colors_scheme['anomaly'])]:
+                    data = df[df['anomaly'] == anomaly_val][col]
+                    fig_box.add_trace(
+                        go.Box(y=data, name='Normal' if anomaly_val == 0 else 'Anomaly',
+                               marker_color=color, showlegend=(i == 1)),
+                        row=1, col=i
+                    )
             
             fig_box.update_layout(
-                title=dict(text="Feature Distribution Comparison", font=dict(size=20, family='Inter', color='#2d3748')),
-                yaxis_title="Value",
-                height=500,
-                showlegend=True,
-                legend=dict(font=dict(size=12)),
-                margin=dict(l=40, r=20, t=60, b=40),
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)'
+                title="Feature Distribution by Anomaly Status",
+                template="plotly_white",
+                height=400,
+                showlegend=True
             )
             figs['boxplot'] = fig_box
         
-        # Category bar charts
-        if cat_cols:
-            for cat_col in cat_cols[:2]:
-                if cat_col in df.columns:
-                    cat_agg = df.groupby(cat_col)['anomaly'].agg(['sum', 'count']).reset_index()
-                    cat_agg['rate'] = (cat_agg['sum'] / cat_agg['count'] * 100).round(2)
-                    cat_agg = cat_agg.nlargest(10, 'sum')
-                    
-                    fig_cat = go.Figure()
-                    fig_cat.add_trace(go.Bar(
-                        x=cat_agg[cat_col],
-                        y=cat_agg['sum'],
-                        marker_color='#ef4444',
-                        text=cat_agg['sum'],
-                        textposition='outside',
-                        hovertemplate=f'<b>%{{x}}</b><br>Anomalies: %{{y}}<br>Rate: {cat_agg["rate"]}%<extra></extra>'
-                    ))
-                    
-                    fig_cat.update_layout(
-                        title=dict(text=f"Top Anomalies by {cat_col}", font=dict(size=20, family='Inter', color='#2d3748')),
-                        xaxis_title=cat_col,
-                        yaxis_title="Anomaly Count",
-                        height=400,
-                        margin=dict(l=40, r=20, t=60, b=40),
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)'
-                    )
-                    figs[f'cat_{cat_col}'] = fig_cat
-        
+        return figs
     except Exception as e:
-        st.error(f"Visualization error: {str(e)}")
-    
-    return figs
+        st.error(f"Error creating visualizations: {e}")
+        return figs
 
-def engineer_feature(con, parquet_path: str, feature_name: str, expression: str) -> bool:
-    """Create new feature using SQL expression"""
+def generate_pdf_report(insights: dict, categorical_cols: list, numeric_cols: list) -> BytesIO | None:
+    """Generate PDF report"""
     try:
-        # Create temp table with new feature
-        query = f"""
-            CREATE OR REPLACE TABLE temp_data AS 
-            SELECT *, ({expression}) as "{feature_name}"
-            FROM parquet_scan('{parquet_path}')
-        """
-        con.execute(query)
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+        styles = getSampleStyleSheet()
         
-        # Export back to parquet
-        con.execute(f"COPY temp_data TO '{parquet_path}' (FORMAT PARQUET, COMPRESSION SNAPPY)")
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            textColor=colors.HexColor('#6366f1'),
+            spaceAfter=30,
+            alignment=1
+        )
         
-        return True
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=16,
+            textColor=colors.HexColor('#8b5cf6'),
+            spaceAfter=12,
+            spaceBefore=12
+        )
+        
+        elements = []
+        
+        # Title
+        elements.append(Paragraph("🎯 Anomaly Detection Pro - Analysis Report", title_style))
+        elements.append(Spacer(1, 20))
+        
+        # Executive Summary
+        elements.append(Paragraph("Executive Summary", heading_style))
+        elements.append(Paragraph(f"<b>Total Records:</b> {insights['total_records']:,}", styles['Normal']))
+        elements.append(Paragraph(f"<b>Anomalies Detected:</b> {insights['anomalies']:,} ({insights['anomaly_rate']:.2f}%)", styles['Normal']))
+        elements.append(Paragraph(f"<b>Detection Method:</b> {insights['method']}", styles['Normal']))
+        
+        # Show expected vs actual if available
+        if 'expected_anomalies' in insights:
+            elements.append(Paragraph(f"<b>Expected Anomalies:</b> {insights['expected_anomalies']:,}", styles['Normal']))
+        
+        elements.append(Paragraph(f"<b>Analysis Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
+        elements.append(Spacer(1, 20))
+        
+        # Categorical insights
+        if 'categorical_insights' in insights and insights['categorical_insights']:
+            for cat_col, cat_data in insights['categorical_insights'].items():
+                if cat_data['top_categories']:
+                    elements.append(Paragraph(f"Top Categories - {cat_col}", heading_style))
+                    
+                    table_data = [[cat_col, 'Anomaly Count', 'Total Count', 'Anomaly Rate (%)']]
+                    for cat in cat_data['top_categories'][:10]:
+                        table_data.append([
+                            str(cat.get(cat_col, 'N/A'))[:30],
+                            str(cat.get('anomaly_count', 0)),
+                            str(cat.get('total_count', 0)),
+                            f"{cat.get('anomaly_rate', 0):.2f}"
+                        ])
+                    
+                    t = Table(table_data, colWidths=[2.5*inch, 1.5*inch, 1.5*inch, 1.5*inch])
+                    t.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#6366f1')),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 12),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+                    ]))
+                    elements.append(t)
+                    elements.append(Spacer(1, 20))
+        
+        # Feature importance
+        if 'feature_importance' in insights and insights['feature_importance']:
+            elements.append(Paragraph("Feature Analysis", heading_style))
+            
+            feature_data = [['Feature', 'Anomaly Mean', 'Normal Mean', 'Difference']]
+            for feat, stats in insights['feature_importance'].items():
+                feature_data.append([
+                    feat,
+                    f"{stats['anomaly_mean']:.2f}",
+                    f"{stats['normal_mean']:.2f}",
+                    f"{stats['difference']:.2f}"
+                ])
+            
+            t2 = Table(feature_data, colWidths=[2*inch, 1.5*inch, 1.5*inch, 1.5*inch])
+            t2.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8b5cf6')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.lightblue),
+                ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+            ]))
+            elements.append(t2)
+        
+        doc.build(elements)
+        buffer.seek(0)
+        return buffer
     except Exception as e:
-        st.error(f"Feature engineering failed: {str(e)}")
-        return False
+        st.error(f"Error generating PDF: {e}")
+        return None
 
-# Main UI
-st.title("🎯 Anomaly Hunter Pro")
-st.markdown("<p style='color: #4a5568; font-size: 1.1rem; font-weight: 500;'>Enterprise-Grade Anomaly Detection Platform • Powered by Advanced ML & Statistical Methods</p>", unsafe_allow_html=True)
+# =============================================================================
+# MAIN APP
+# =============================================================================
+
+# Header with hero animation
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.markdown("""
+    <div class="main-header">
+        <h1>🎯 Anomaly Detection Pro</h1>
+        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col2:
+    lottie_hero = load_lottie_url(LOTTIE_URLS['hero'])
+    if lottie_hero:
+        display_lottie(lottie_hero, height=180, key="hero_animation")
+
 
 # Sidebar
 with st.sidebar:
-    st.markdown("## 📁 Data Upload")
+    st.markdown("## 🎛️ Control Panel")
+    st.markdown("---")
     
-    uploaded_file = st.file_uploader(
-        "Choose a file",
-        type=['csv', 'xlsx', 'xls', 'txt', 'parquet'],
-        help="Upload CSV, Excel, TXT, or Parquet files (max 200MB)"
-    )
+    st.markdown("""
+    ### 📚 Quick Guide
     
-    if uploaded_file and not st.session_state.data_loaded:
-        file_type = get_file_type(uploaded_file.name)
+    **1.** Upload data (CSV/Excel/Parquet)  
+    **2.** Select features for analysis  
+    **3.** Choose detection algorithm  
+    **4.** Analyze & get insights  
+    **5.** Export results & reports
+    """)
+    
+    st.markdown("---")
+    
+    with st.expander("🧠 Algorithm Guide"):
+        st.markdown("""
+        **Statistical** (Fast, Scalable)
+        
+        • **Z-Score** - Detects outliers >3σ  
+        • **IQR** - Interquartile range method
+        
+        **Machine Learning** (Advanced)
+        
+        • **Isolation Forest** - Global anomalies  
+        • **LOF** - Local neighborhood outliers  
+        • **One-Class SVM** - Non-linear boundaries
+        
+        **🔧 FIXED:** Expected rate is now a guide, not a quota!
+        """)
+    
+    st.markdown("---")
+    
+    if st.button("🔄 Reset App", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
+# Tabs
+tab1, tab2, tab3 = st.tabs(["📂 Data Upload", "🔍 Analysis", "📊 Results"])
+
+# =============================================================================
+# TAB 1: DATA UPLOAD
+# =============================================================================
+
+with tab1:
+    st.markdown("### 📤 Upload Your Data")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        uploaded_file = st.file_uploader(
+            "Choose a file",
+            type=['csv', 'xlsx', 'xls', 'txt', 'parquet'],
+            help="Supported: CSV, Excel, Text, Parquet"
+        )
+    
+    with col2:
+        use_sample = st.checkbox("Use Sample Data", help="Load demo dataset")
+    
+    # Lottie animation for upload state
+    if not st.session_state.data_loaded and not use_sample and not uploaded_file:
+        st.markdown("<div class='lottie-container'>", unsafe_allow_html=True)
+        lottie_upload = load_lottie_url(LOTTIE_URLS['upload'])
+        display_lottie(lottie_upload, height=250, key="upload_animation")
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.info("👆 Upload a file or use sample data to get started")
+    
+    if use_sample:
+        with st.spinner("🎲 Generating sample data..."):
+            np.random.seed(42)
+            n_samples = 10000
+            
+            feature1 = np.random.normal(100, 15, n_samples)
+            feature2 = np.random.normal(200, 30, n_samples)
+            feature3 = np.random.normal(50, 10, n_samples)
+            
+            anomaly_indices = np.random.choice(n_samples, size=int(n_samples * 0.05), replace=False)
+            feature1[anomaly_indices] *= np.random.uniform(2, 4, len(anomaly_indices))
+            feature2[anomaly_indices] *= np.random.uniform(0.2, 0.5, len(anomaly_indices))
+            
+            df_sample = pd.DataFrame({
+                'Category': np.random.choice(['A', 'B', 'C', 'D', 'E'], n_samples),
+                'Department': np.random.choice(['Sales', 'Marketing', 'Engineering', 'Support'], n_samples),
+                'Feature_1': feature1,
+                'Feature_2': feature2,
+                'Feature_3': feature3,
+                'Date': pd.date_range('2024-01-01', periods=n_samples, freq='H')
+            })
+            
+            parquet_path = os.path.join(st.session_state.temp_dir, 'sample_data.parquet')
+            df_sample.to_parquet(parquet_path, compression='snappy')
+            
+            st.session_state.parquet_path = parquet_path
+            st.session_state.data_loaded = True
+            st.session_state.row_count = len(df_sample)
+            
+            con = initialize_duckdb()
+            st.session_state.column_info = get_column_stats(con, parquet_path)
+            
+            st.success("✅ Sample data loaded!")
+            st.balloons()
+    
+    elif uploaded_file:
+        file_type = detect_file_type(uploaded_file)
         
         if file_type:
-            parquet_path, rows, cols = convert_to_parquet(uploaded_file, file_type)
+            st.info(f"📄 Detected: **{file_type.upper()}**")
             
-            if parquet_path:
-                st.session_state.parquet_path = parquet_path
-                st.session_state.row_count = rows
-                st.session_state.data_loaded = True
+            if st.button("🚀 Process File", type="primary", use_container_width=True):
+                parquet_path, row_count, col_count = convert_to_parquet(uploaded_file, file_type)
                 
-                con = get_duckdb_con()
-                st.session_state.column_info = get_column_stats(con, parquet_path)
-                
-                st.markdown(f'<div class="success-box"><b>✅ Loaded:</b> {rows:,} rows × {cols} columns</div>', unsafe_allow_html=True)
-                time.sleep(1)
-                st.rerun()
+                if parquet_path:
+                    st.session_state.parquet_path = parquet_path
+                    st.session_state.data_loaded = True
+                    st.session_state.row_count = row_count
+                    
+                    con = initialize_duckdb()
+                    st.session_state.column_info = get_column_stats(con, parquet_path)
+                    
+                    st.markdown(f"""
+                    <div class="success-box">
+                        <h4>✅ File Processed Successfully!</h4>
+                        <p><b>Rows:</b> {row_count:,} | <b>Columns:</b> {col_count}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.balloons()
         else:
             st.error("❌ Unsupported file format")
     
-    if st.session_state.data_loaded:
+    # Data overview
+    if st.session_state.data_loaded and st.session_state.parquet_path:
         st.markdown("---")
-        st.markdown("## ⚙️ Configuration")
+        st.markdown("### 📊 Data Overview")
         
-        # Get column lists - FIXED: NO CAPS on categorical columns
-        numeric_cols = [col for col, info in st.session_state.column_info.items() 
-                       if any(t in info['type'].upper() for t in ['INT', 'DOUBLE', 'DECIMAL', 'FLOAT', 'NUMERIC'])]
+        con = initialize_duckdb()
         
-        # Show ALL categorical columns - no distinct value limit
-        categorical_cols = [col for col, info in st.session_state.column_info.items()
-                          if any(t in info['type'].upper() for t in ['VARCHAR', 'TEXT', 'STRING'])]
+        # Metrics
+        col1, col2, col3, col4 = st.columns(4)
         
-        date_cols = [col for col, info in st.session_state.column_info.items()
-                    if any(t in info['type'].upper() for t in ['DATE', 'TIMESTAMP'])]
-        
-        # Feature selection
-        st.markdown("### 📊 Features")
-        selected_numeric = st.multiselect(
-            "Numeric features *",
-            numeric_cols,
-            default=numeric_cols[:min(3, len(numeric_cols))],
-            help="Select numeric columns for anomaly detection"
-        )
-        
-        selected_categorical = st.multiselect(
-            "Categorical (optional)",
-            categorical_cols,
-            help="For grouping and segmentation analysis"
-        )
-        
-        selected_date = st.selectbox(
-            "Date column (optional)",
-            [None] + date_cols,
-            help="For timeline visualization"
-        )
-        
-        st.markdown("---")
-        st.markdown("### 🎯 Detection Method")
-        
-        method_type = st.radio(
-            "Method Type",
-            ["Statistical", "Machine Learning"],
-            help="Statistical: Fast, interpretable | ML: Advanced patterns"
-        )
-        
-        if method_type == "Statistical":
-            stat_method = st.selectbox(
-                "Algorithm",
-                ["Z-Score", "IQR", "MAD"],
-                help="Z-Score: Standard dev | IQR: Box plot | MAD: Robust median"
-            )
-            
-            threshold = st.slider(
-                "Sensitivity",
-                1.5, 5.0, 3.0, 0.5,
-                help="Lower = More sensitive (more anomalies)"
-            )
-            
-            method_config = ('stat', stat_method.split()[0].lower(), threshold)
-            
-        else:
-            ml_method = st.selectbox(
-                "Algorithm",
-                ["Isolation Forest", "Local Outlier Factor", "One-Class SVM", "Elliptic Envelope"],
-                help="Choose ML algorithm based on data characteristics"
-            )
-            
-            contamination = st.slider(
-                "Expected Anomaly Rate",
-                0.01, 0.30, 0.10, 0.01,
-                format="%.2f",
-                help="Expected proportion of anomalies (0.10 = 10%)"
-            )
-            
-            method_map = {
-                "Isolation Forest": "isolation_forest",
-                "Local Outlier Factor": "lof",
-                "One-Class SVM": "one_class_svm",
-                "Elliptic Envelope": "elliptic_envelope"
-            }
-            
-            method_config = ('ml', method_map[ml_method], contamination)
-        
-        st.markdown("---")
-        
-        # Run detection button
-        if st.button("🚀 Run Detection", use_container_width=True):
-            if not selected_numeric:
-                st.error("⚠️ Please select at least one numeric feature")
-            else:
-                with st.spinner("🔍 Detecting anomalies..."):
-                    con = get_duckdb_con()
-                    method_cat, method_name, param = method_config
-                    
-                    if method_cat == 'stat':
-                        df_results = detect_anomalies_statistical(
-                            con, st.session_state.parquet_path, 
-                            selected_numeric, method_name, param
-                        )
-                    else:
-                        # Load data for ML
-                        df_full = con.execute(
-                            f"SELECT * FROM parquet_scan('{st.session_state.parquet_path}') LIMIT 100000"
-                        ).df()
-                        df_results = detect_anomalies_ml(
-                            df_full, selected_numeric, method_name, param
-                        )
-                    
-                    if df_results is not None:
-                        st.session_state.results_df = df_results
-                        st.session_state.selected_numeric = selected_numeric
-                        st.session_state.selected_categorical = selected_categorical
-                        st.session_state.selected_date = selected_date
-                        
-                        # Save to history
-                        st.session_state.analysis_history.append({
-                            'timestamp': datetime.now(),
-                            'method': f"{method_cat}_{method_name}",
-                            'features': len(selected_numeric),
-                            'anomalies': int(df_results['anomaly'].sum())
-                        })
-                        
-                        st.success("✅ Analysis complete!")
-                        time.sleep(0.5)
-                        st.rerun()
-        
-        # Clear button - FIXED to properly reset state
-        if st.session_state.data_loaded:
-            st.markdown("---")
-            if st.button("🗑️ Clear Data", use_container_width=True):
-                # Close DuckDB connection first
-                if 'duckdb_con' in st.session_state and st.session_state.duckdb_con is not None:
-                    try:
-                        st.session_state.duckdb_con.close()
-                    except:
-                        pass
-                
-                # Reset critical keys
-                st.session_state.parquet_path = None
-                st.session_state.duckdb_con = None
-                st.session_state.data_loaded = False
-                st.session_state.row_count = 0
-                st.session_state.column_info = {}
-                st.session_state.results_df = None
-                st.session_state.selected_numeric = []
-                st.session_state.selected_categorical = []
-                st.session_state.selected_date = None
-                
-                st.rerun()
-
-# Main content area
-if not st.session_state.data_loaded:
-    # Welcome screen
-    st.markdown("""
-    <div class="info-box">
-        <h3>👋 Welcome to Anomaly Hunter Pro</h3>
-        <p><b>Get started in 3 simple steps:</b></p>
-        <ol style="margin-left: 1.5rem;">
-            <li>📁 Upload your data file (CSV, Excel, Parquet, or TXT)</li>
-            <li>⚙️ Select features and detection method in the sidebar</li>
-            <li>🚀 Click "Run Detection" and analyze results</li>
-        </ol>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("## 🎯 Key Features")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("""
-        **🔍 Detection Methods**
-        - Z-Score Analysis
-        - IQR (Box Plot)
-        - MAD (Robust)
-        - Isolation Forest
-        - Local Outlier Factor
-        - One-Class SVM
-        - Elliptic Envelope
-        """)
-    
-    with col2:
-        st.markdown("""
-        **📊 Visualizations**
-        - Distribution charts
-        - Score histograms
-        - Timeline analysis
-        - Feature scatter plots
-        - Box plot comparisons
-        - Category breakdowns
-        """)
-    
-    with col3:
-        st.markdown("""
-        **💾 Export Options**
-        - CSV format
-        - Parquet format
-        - Excel with metadata
-        - Feature engineering
-        - Batch processing
-        - Custom thresholds
-        """)
-    
-    st.markdown("---")
-    
-    st.markdown("## 📚 Supported File Formats")
-    
-    format_col1, format_col2, format_col3, format_col4 = st.columns(4)
-    
-    with format_col1:
-        st.markdown("**📄 CSV**")
-        st.markdown("Standard comma-separated values")
-    
-    with format_col2:
-        st.markdown("**📊 Excel**")
-        st.markdown("XLSX and XLS formats")
-    
-    with format_col3:
-        st.markdown("**📦 Parquet**")
-        st.markdown("Optimized columnar format")
-    
-    with format_col4:
-        st.markdown("**📝 Text**")
-        st.markdown("Tab or comma delimited")
-
-elif st.session_state.results_df is None:
-    # Data loaded but no analysis yet
-    st.markdown("## 📊 Data Overview")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{st.session_state.row_count:,}</div>
-            <div class="metric-label">Total Rows</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{len(st.session_state.column_info)}</div>
-            <div class="metric-label">Columns</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        numeric_count = len([c for c, i in st.session_state.column_info.items() 
-                           if any(t in i['type'].upper() for t in ['INT', 'DOUBLE', 'DECIMAL'])])
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{numeric_count}</div>
-            <div class="metric-label">Numeric Features</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col4:
-        cat_count = len([c for c, i in st.session_state.column_info.items() 
-                        if 'VARCHAR' in i['type'].upper()])
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{cat_count}</div>
-            <div class="metric-label">Categorical</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    # Feature engineering section
-    with st.expander("⚙️ Feature Engineering", expanded=False):
-        st.markdown("Create custom features using DuckDB SQL expressions")
-        
-        col1, col2 = st.columns([3, 1])
+        numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT', 'NUMBER']
+        numeric_count = sum(1 for v in st.session_state.column_info.values() 
+                          if any(ntype in v['type'].upper() for ntype in numeric_types))
+        categorical_count = sum(1 for v in st.session_state.column_info.values() 
+                              if 'VARCHAR' in v['type'].upper() or 'STRING' in v['type'].upper())
         
         with col1:
-            feature_name = st.text_input(
-                "Feature Name",
-                placeholder="new_feature",
-                help="Name for your new feature"
-            )
+            st.markdown(create_metric_card("Total Rows", f"{st.session_state.row_count:,}"), unsafe_allow_html=True)
+        with col2:
+            st.markdown(create_metric_card("Columns", len(st.session_state.column_info)), unsafe_allow_html=True)
+        with col3:
+            st.markdown(create_metric_card("Numeric", numeric_count), unsafe_allow_html=True)
+        with col4:
+            st.markdown(create_metric_card("Categorical", categorical_count), unsafe_allow_html=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Column details
+        with st.expander("🔍 View Column Details"):
+            col_df = pd.DataFrame([
+                {
+                    'Column': col,
+                    'Type': info['type'],
+                    'Distinct': info['distinct'],
+                    'Nulls': info['nulls'],
+                    'Null %': f"{info['null_pct']:.2f}%"
+                }
+                for col, info in st.session_state.column_info.items()
+            ])
+            st.dataframe(col_df, use_container_width=True, height=400)
+        
+        # Data preview
+        with st.expander("👀 Data Preview"):
+            sample_df = get_sample_data(con, st.session_state.parquet_path, 1000)
+            st.dataframe(sample_df, use_container_width=True, height=400)
+
+# =============================================================================
+# TAB 2: ANALYSIS
+# =============================================================================
+
+with tab2:
+    if not st.session_state.data_loaded:
+        st.markdown("""
+        <div class="info-box">
+            <h4>⚠️ No Data Loaded</h4>
+            <p>Upload data in the <b>Data Upload</b> tab first.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Empty state animation
+        lottie_empty = load_lottie_url(LOTTIE_URLS['empty'])
+        display_lottie(lottie_empty, height=200, key="empty_animation")
+    else:
+        st.markdown("### ⚙️ Configure Analysis")
+        
+        con = initialize_duckdb()
+        
+        # Column selection
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown("#### 📋 Categorical")
+            categorical_cols = [col for col, info in st.session_state.column_info.items() 
+                              if 'VARCHAR' in info['type'].upper() or 'STRING' in info['type'].upper()]
             
-            feature_expr = st.text_area(
-                "SQL Expression",
-                placeholder="Examples:\n• col1 + col2\n• CASE WHEN amount > 1000 THEN 1 ELSE 0 END\n• col1 / NULLIF(col2, 0)",
-                height=120,
-                help="Use DuckDB SQL syntax"
+            selected_categorical_cols = st.multiselect(
+                "Choose for grouping",
+                categorical_cols,
+                help="Category-level analysis"
             )
-            
-            st.caption(f"**Available columns:** {', '.join(list(st.session_state.column_info.keys())[:10])}" + 
-                      (f" ... and {len(st.session_state.column_info) - 10} more" if len(st.session_state.column_info) > 10 else ""))
         
         with col2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("➕ Create Feature", use_container_width=True):
-                if feature_name and feature_expr:
-                    con = get_duckdb_con()
-                    if engineer_feature(con, st.session_state.parquet_path, feature_name, feature_expr):
-                        st.session_state.column_info = get_column_stats(con, st.session_state.parquet_path)
-                        st.session_state.engineered_features.append(feature_name)
-                        st.success(f"✅ Created: {feature_name}")
-                        time.sleep(1)
-                        st.rerun()
+            st.markdown("#### 🔢 Numeric")
+            numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT', 'NUMBER']
+            numeric_cols_available = [col for col, info in st.session_state.column_info.items() 
+                                     if any(ntype in info['type'].upper() for ntype in numeric_types)]
+            
+            numeric_cols = st.multiselect(
+                "Choose for detection",
+                numeric_cols_available,
+                default=numeric_cols_available[:3] if len(numeric_cols_available) >= 3 else numeric_cols_available,
+                help="Features for anomaly detection"
+            )
+        
+        with col3:
+            st.markdown("#### 📅 Date (Optional)")
+            date_cols = [col for col, info in st.session_state.column_info.items() 
+                        if 'DATE' in info['type'].upper() or 'TIMESTAMP' in info['type'].upper()]
+            
+            date_col = st.selectbox(
+                "Choose for time analysis",
+                ['None'] + date_cols,
+                help="Time-based analysis"
+            )
+            date_col = None if date_col == 'None' else date_col
+        
+        st.markdown("---")
+        
+        # Method selection
+        st.markdown("#### 🎯 Detection Method")
+        
+        method_category = st.radio(
+            "Category",
+            ['Statistical (Fast)', 'Machine Learning (Advanced)'],
+            horizontal=True
+        )
+        
+        col1, col2, col3 = st.columns(3)
+        
+        if method_category == 'Statistical (Fast)':
+            with col1:
+                method = st.selectbox("Algorithm", ['Z-Score', 'IQR Method'])
+            with col2:
+                if method == 'Z-Score':
+                    threshold = st.slider("Threshold", 2.0, 5.0, 3.0, 0.5)
                 else:
-                    st.error("⚠️ Please provide both feature name and expression")
-    
-    st.markdown("---")
-    
-    # Data preview
-    st.markdown("### 📋 Data Preview")
-    
-    con = get_duckdb_con()
-    sample_df = con.execute(f"SELECT * FROM parquet_scan('{st.session_state.parquet_path}') LIMIT 100").df()
-    st.dataframe(sample_df, use_container_width=True, height=400)
-    
-    # Column details
-    with st.expander("📊 Column Details"):
-        col_details = pd.DataFrame([
-            {
-                'Column': col,
-                'Type': info['type'],
-                'Distinct Values': info['distinct'],
-                'Null Count': info['nulls'],
-                'Null %': f"{info['null_pct']:.1f}%"
-            }
-            for col, info in st.session_state.column_info.items()
-        ])
-        st.dataframe(col_details, use_container_width=True, hide_index=True)
+                    threshold = None
+            
+            detection_method = 'zscore' if method == 'Z-Score' else 'iqr'
+            use_ml = False
+        else:
+            with col1:
+                method = st.selectbox("Algorithm", ['Isolation Forest', 'Local Outlier Factor', 'One-Class SVM'])
+            with col2:
+                contamination = st.slider("Expected Anomaly Rate (Sensitivity Guide)", 0.01, 0.5, 0.1, 0.01, 
+                                        help="This is a GUIDE, not a hard limit. Algorithm can find more or fewer anomalies.")
+                
+                # Show explanation
+                with st.expander("ℹ️ What does this mean? (IMPROVED)", expanded=False):
+                    st.markdown(explain_contamination(contamination, st.session_state.row_count))
+            with col3:
+                max_sample = min(50000, st.session_state.row_count) if method != 'Isolation Forest' else st.session_state.row_count
+                use_sampling = st.checkbox("Use Sampling", value=st.session_state.row_count > 50000 and method != 'Isolation Forest')
+                
+                if use_sampling:
+                    sample_size = st.number_input("Sample Size", 1000, max_sample, min(50000, max_sample))
+                else:
+                    sample_size = max_sample
+                    st.info(f"Full dataset: {sample_size:,} rows")
+            
+            method_map = {'Isolation Forest': 'isolation_forest', 'Local Outlier Factor': 'lof', 'One-Class SVM': 'one_class_svm'}
+            detection_method = method_map[method]
+            use_ml = True
+        
+        st.markdown("---")
+        
+        # Run analysis
+        if not numeric_cols:
+            st.warning("⚠️ Select at least one numeric column")
+        else:
+            if st.button("🚀 Run Anomaly Detection", type="primary", use_container_width=True):
+                
+                # Processing animation
+                lottie_processing = load_lottie_url(LOTTIE_URLS['processing'])
+                processing_placeholder = st.empty()
+                with processing_placeholder.container():
+                    st.markdown("<div class='lottie-container'>", unsafe_allow_html=True)
+                    display_lottie(lottie_processing, height=150, key="processing_animation")
+                    st.markdown("</div>", unsafe_allow_html=True)
+                
+                with st.spinner(f"🔍 Running {method}..."):
+                    start_time = time.time()
+                    
+                    try:
+                        if use_ml:
+                            if use_sampling and st.session_state.row_count > sample_size:
+                                query = f"SELECT * FROM parquet_scan('{st.session_state.parquet_path}') USING SAMPLE {sample_size} ROWS"
+                                df = con.execute(query).df()
+                            else:
+                                df = get_sample_data(con, st.session_state.parquet_path, st.session_state.row_count)
+                            
+                            results_df, detection_metadata = detect_anomalies_ml(df, numeric_cols, detection_method, contamination)
+                            # Store metadata in session state
+                            st.session_state.detection_metadata = detection_metadata
+                        else:
+                            results_df = detect_anomalies_statistical(con, st.session_state.parquet_path, numeric_cols, detection_method, threshold if detection_method == 'zscore' else 3)
+                            st.session_state.detection_metadata = {}
+                        
+                        if results_df is not None:
+                            st.session_state.results_df = results_df
+                            st.session_state.analysis_complete = True
+                            st.session_state.selected_numeric_cols = numeric_cols
+                            st.session_state.selected_categorical_cols = selected_categorical_cols
+                            st.session_state.selected_date_col = date_col
+                            st.session_state.selected_method = method
+                            if use_ml:
+                                st.session_state.contamination_rate = contamination
+                            else:
+                                st.session_state.contamination_rate = None
+                            
+                            elapsed_time = time.time() - start_time
+                            
+                            # Clear processing animation
+                            processing_placeholder.empty()
+                            
+                            # Success animation
+                            lottie_success = load_lottie_url(LOTTIE_URLS['success'])
+                            display_lottie(lottie_success, height=150, key="success_animation")
+                            
+                            st.success(f"✅ Complete in {elapsed_time:.2f}s!")
+                            st.balloons()
+                            
+                            anomaly_count = results_df['anomaly'].sum()
+                            anomaly_rate = (anomaly_count / len(results_df) * 100)
+                            expected_count = int(len(results_df) * contamination) if use_ml else None
+                            
+                            result_msg = f"""
+                            <div class="success-box">
+                                <h4>📊 Quick Results</h4>
+                                <p><b>Detected:</b> {anomaly_count:,} / {len(results_df):,} ({anomaly_rate:.2f}%)</p>
+                            """
+                            
+                            if expected_count:
+                                diff = anomaly_count - expected_count
+                                result_msg += f"<p><b>Expected:</b> ~{expected_count:,} ({contamination*100:.1f}%)</p>"
+                                if abs(diff) > expected_count * 0.1:  # More than 10% difference
+                                    result_msg += f"<p><b>Difference:</b> {diff:+,} anomalies ({(diff/expected_count)*100:+.1f}%)</p>"
+                            
+                            result_msg += "<p>👉 View details in <b>Results</b> tab</p></div>"
+                            
+                            st.markdown(result_msg, unsafe_allow_html=True)
+                    
+                    except Exception as e:
+                        processing_placeholder.empty()
+                        st.error(f"❌ Error: {e}")
+                        import traceback
+                        st.error(traceback.format_exc())
 
-else:
-    # Results view
-    df_results = st.session_state.results_df
-    numeric_cols = st.session_state.selected_numeric
-    cat_cols = st.session_state.selected_categorical
-    date_col = st.session_state.selected_date
-    
-    total = len(df_results)
-    anomalies = int(df_results['anomaly'].sum())
-    anomaly_rate = (anomalies / total * 100) if total > 0 else 0
-    normal = total - anomalies
-    
-    st.markdown("## 🎯 Detection Results")
-    
-    # Key metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{total:,}</div>
-            <div class="metric-label">Total Records</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{anomalies:,}</div>
-            <div class="metric-label">Anomalies Detected</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{anomaly_rate:.2f}%</div>
-            <div class="metric-label">Anomaly Rate</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{normal:,}</div>
-            <div class="metric-label">Normal Records</div>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    # Summary box
-    if anomalies > 0:
-        high_priority = len(df_results[df_results['anomaly_score'] > df_results['anomaly_score'].quantile(0.95)]) if 'anomaly_score' in df_results.columns else 0
-        st.markdown(f"""
-        <div class="warning-box">
-            <b>🔍 Analysis Summary</b><br>
-            • Found <b>{anomalies:,} anomalies</b> ({anomaly_rate:.2f}% of dataset)<br>
-            • Analyzed <b>{len(numeric_cols)} features</b>: {', '.join(numeric_cols)}<br>
-            • High priority records (>95th percentile): <b>{high_priority}</b>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
+# =============================================================================
+# TAB 3: RESULTS
+# =============================================================================
+
+with tab3:
+    if not st.session_state.analysis_complete:
         st.markdown("""
-        <div class="success-box">
-            <b>✅ Clean Dataset</b><br>
-            No significant anomalies detected. Consider adjusting sensitivity or trying different features.
+        <div class="info-box">
+            <h4>⚠️ No Results</h4>
+            <p>Run analysis in <b>Analysis</b> tab first.</p>
         </div>
         """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    # Tabbed interface
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Overview", "📈 Analysis", "📋 Data Table", "💾 Export"])
-    
-    with tab1:
-        st.markdown("### Visualizations")
         
-        figs = create_visualizations(df_results, numeric_cols, cat_cols, date_col)
+        # Empty state animation
+        lottie_empty = load_lottie_url(LOTTIE_URLS['empty'])
+        display_lottie(lottie_empty, height=200, key="empty_results_animation")
+    else:
+        df_results = st.session_state.results_df
+        numeric_cols = st.session_state.selected_numeric_cols
+        categorical_cols = st.session_state.selected_categorical_cols
+        date_col = st.session_state.selected_date_col
+        method = st.session_state.selected_method
         
-        # Two column layout
+        st.markdown("### 📊 Analysis Results")
+        
+        insights = generate_insights(df_results, categorical_cols, numeric_cols, method)
+        
+        # Metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.markdown(create_metric_card("Total Records", f"{insights['total_records']:,}"), unsafe_allow_html=True)
+        with col2:
+            st.markdown(create_metric_card("Anomalies", f"{insights['anomalies']:,}"), unsafe_allow_html=True)
+        with col3:
+            st.markdown(create_metric_card("Anomaly Rate", f"{insights['anomaly_rate']:.2f}%"), unsafe_allow_html=True)
+        with col4:
+            st.markdown(create_metric_card("Method", method), unsafe_allow_html=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Executive narrative summary
+        expected_rate = st.session_state.get('contamination_rate', None)
+        narrative = generate_narrative(insights, categorical_cols, numeric_cols, expected_rate)
+        st.markdown(narrative)
+        
+        st.markdown("---")
+        
+        # Visualizations
+        st.markdown("### 📈 Visualizations")
+        
+        figs = create_visualizations(df_results, numeric_cols, categorical_cols, date_col)
+        
+        # Pie chart with narrative
         col1, col2 = st.columns(2)
         
         with col1:
             if 'pie' in figs:
+                with st.expander("ℹ️ Understanding this chart", expanded=False):
+                    st.markdown(get_chart_narrative('pie'))
                 st.plotly_chart(figs['pie'], use_container_width=True)
         
         with col2:
             if 'histogram' in figs:
+                with st.expander("ℹ️ Understanding this chart", expanded=False):
+                    st.markdown(get_chart_narrative('histogram'))
                 st.plotly_chart(figs['histogram'], use_container_width=True)
         
-        # Full width charts
-        if 'timeline' in figs:
-            st.plotly_chart(figs['timeline'], use_container_width=True)
+        if 'timeseries' in figs:
+            with st.expander("ℹ️ Understanding this chart", expanded=False):
+                st.markdown(get_chart_narrative('timeseries'))
+            st.plotly_chart(figs['timeseries'], use_container_width=True)
         
         if 'scatter' in figs:
+            with st.expander("ℹ️ Understanding this chart", expanded=False):
+                st.markdown(get_chart_narrative('scatter'))
             st.plotly_chart(figs['scatter'], use_container_width=True)
         
+        for key in figs.keys():
+            if key.startswith('category_bar_'):
+                with st.expander("ℹ️ Understanding this chart", expanded=False):
+                    st.markdown(get_chart_narrative('category'))
+                st.plotly_chart(figs[key], use_container_width=True)
+        
         if 'boxplot' in figs:
-            st.plotly_chart(figs['boxplot'], use_container_width=True)
-    
-    with tab2:
-        st.markdown("### Feature Impact Analysis")
+            with st.expander("📦 Box Plot Analysis"):
+                st.markdown(get_chart_narrative('boxplot'))
+                st.plotly_chart(figs['boxplot'], use_container_width=True)
         
-        if anomalies > 0:
-            # Calculate feature statistics
-            feature_stats = []
-            for col in numeric_cols:
-                if col in df_results.columns:
-                    anom_data = df_results[df_results['anomaly'] == 1][col]
-                    norm_data = df_results[df_results['anomaly'] == 0][col]
-                    
-                    anom_mean = anom_data.mean()
-                    norm_mean = norm_data.mean()
-                    diff = abs(anom_mean - norm_mean)
-                    pct_diff = (diff / norm_mean * 100) if norm_mean != 0 else 0
-                    
-                    feature_stats.append({
-                        'Feature': col,
-                        'Anomaly Mean': f"{anom_mean:.2f}",
-                        'Normal Mean': f"{norm_mean:.2f}",
-                        'Difference': f"{diff:.2f}",
-                        'Impact %': f"{pct_diff:.1f}%"
-                    })
-            
-            if feature_stats:
-                st.dataframe(
-                    pd.DataFrame(feature_stats),
-                    use_container_width=True,
-                    hide_index=True
-                )
+        st.markdown("---")
         
-        # Categorical analysis
-        if cat_cols:
-            st.markdown("---")
-            st.markdown("### Categorical Breakdown")
-            
-            for cat_col in cat_cols:
-                if cat_col in df_results.columns:
-                    figs = create_visualizations(df_results, numeric_cols, cat_cols, date_col)
-                    if f'cat_{cat_col}' in figs:
-                        st.plotly_chart(figs[f'cat_{cat_col}'], use_container_width=True)
-                        
-                        # Top categories table
-                        cat_stats = df_results.groupby(cat_col)['anomaly'].agg(['sum', 'count']).reset_index()
-                        cat_stats['rate'] = (cat_stats['sum'] / cat_stats['count'] * 100).round(2)
-                        cat_stats.columns = [cat_col, 'Anomalies', 'Total', 'Rate %']
-                        cat_stats = cat_stats.nlargest(10, 'Anomalies')
-                        
-                        st.dataframe(cat_stats, use_container_width=True, hide_index=True)
-    
-    with tab3:
-        st.markdown("### Complete Results")
+        # Insights
+        st.markdown("### 💡 Key Insights")
         
-        # Add filters
-        col1, col2 = st.columns([2, 1])
+        col1, col2 = st.columns(2)
         
         with col1:
-            filter_anomaly = st.selectbox(
-                "Filter by",
-                ["All Records", "Anomalies Only", "Normal Only"]
-            )
+            st.markdown("#### 🎯 Summary")
+            st.markdown(f"""
+            • Analyzed **{insights['total_records']:,}** records
+            • Detected **{insights['anomalies']:,}** anomalies (**{insights['anomaly_rate']:.2f}%**)
+            • Features: **{', '.join(numeric_cols)}**
+            """)
+            
+            if categorical_cols:
+                st.markdown(f"• Categories: **{', '.join(categorical_cols)}**")
+            if date_col:
+                st.markdown(f"• Time: **{date_col}**")
         
         with col2:
-            sort_by = st.selectbox(
-                "Sort by",
-                ["Anomaly Score (High to Low)", "Anomaly Score (Low to High)"] if 'anomaly_score' in df_results.columns else ["Original Order"]
-            )
+            if 'feature_importance' in insights and insights['feature_importance']:
+                st.markdown("#### 📊 Feature Impact")
+                feature_diff = sorted(insights['feature_importance'].items(), key=lambda x: x[1]['difference'], reverse=True)
+                
+                for feat, stats in feature_diff[:5]:
+                    st.markdown(f"""
+                    • **{feat}**: Anomaly avg = {stats['anomaly_mean']:.2f}, Normal avg = {stats['normal_mean']:.2f} (Δ = {stats['difference']:.2f})
+                    """)
         
-        # Apply filters
-        display_df = df_results.copy()
+        # Categorical insights
+        if 'categorical_insights' in insights and insights['categorical_insights']:
+            st.markdown("---")
+            st.markdown("### 📋 Categorical Analysis")
+            
+            for cat_col, cat_data in insights['categorical_insights'].items():
+                with st.expander(f"🏆 Top Categories - {cat_col}", expanded=True):
+                    if cat_data['top_categories']:
+                        cat_df = pd.DataFrame(cat_data['top_categories'])
+                        display_cols = [cat_col, 'anomaly_count', 'total_count', 'anomaly_rate']
+                        display_cols = [col for col in display_cols if col in cat_df.columns]
+                        
+                        if display_cols:
+                            cat_df_display = cat_df[display_cols].head(10)
+                            cat_df_display['anomaly_rate'] = cat_df_display['anomaly_rate'].round(2)
+                            st.dataframe(cat_df_display, use_container_width=True)
+                            
+                            if cat_data['highest_rate']:
+                                highest = cat_data['highest_rate']
+                                st.info(f"🥇 Highest: **{highest[cat_col]}** at **{highest['anomaly_rate']:.2f}%**")
         
-        if filter_anomaly == "Anomalies Only":
-            display_df = display_df[display_df['anomaly'] == 1]
-        elif filter_anomaly == "Normal Only":
-            display_df = display_df[display_df['anomaly'] == 0]
+        # Full results
+        with st.expander("📋 Full Results Table"):
+            st.dataframe(df_results, use_container_width=True, height=400)
         
-        if 'anomaly_score' in display_df.columns and sort_by != "Original Order":
-            ascending = sort_by == "Anomaly Score (Low to High)"
-            display_df = display_df.sort_values('anomaly_score', ascending=ascending)
+        st.markdown("---")
         
-        st.dataframe(display_df, use_container_width=True, height=500)
+        # Actionable recommendations
+        if insights['anomalies'] > 0:
+            st.markdown("### 🎯 RECOMMENDED NEXT STEPS")
+            
+            high_score_count = len(df_results[df_results['anomaly_score'] > df_results['anomaly_score'].quantile(0.95)]) if 'anomaly_score' in df_results.columns else 0
+            
+            st.markdown(f"""
+            Based on your analysis, here's your action plan:
+            
+            #### 1️⃣ IMMEDIATE ACTION
+            • Export the **{insights['anomalies']:,} flagged records** using CSV button below
+            • Prioritize records with highest scores (top {high_score_count} records with score >95th percentile)
+            • Assign to review team within 24-48 hours
+            
+            #### 2️⃣ DEEP DIVE
+            Focus investigation on:
+            """)
+            
+            # Dynamic recommendations based on results
+            if 'feature_importance' in insights and insights['feature_importance']:
+                top_feature = max(insights['feature_importance'].items(), key=lambda x: x[1]['difference'])
+                st.markdown(f"• **{top_feature[0]}**: Primary differentiator (avg {top_feature[1]['anomaly_mean']:.2f} vs {top_feature[1]['normal_mean']:.2f})")
+            
+            if 'categorical_insights' in insights and insights['categorical_insights']:
+                for cat_col, cat_data in list(insights['categorical_insights'].items())[:1]:
+                    if cat_data['highest_rate']:
+                        highest = cat_data['highest_rate']
+                        st.markdown(f"• **{cat_col} = '{highest[cat_col]}'**: Highest anomaly concentration ({highest['anomaly_rate']:.1f}%)")
+            
+            if date_col:
+                st.markdown(f"• **Time patterns**: Review timeline chart for incident clusters")
+            
+            st.markdown(f"""
+            #### 3️⃣ PREVENTION
+            Consider automated rules:
+            • Set up alerts when anomaly rate exceeds {insights['anomaly_rate']*1.5:.1f}% (1.5x current)
+            • Create review queue for high-risk combinations identified above
+            • Schedule weekly anomaly trend reports
+            
+            #### 4️⃣ VALIDATE
+            • Manually review 20 random flagged records
+            • If >80% are genuinely problematic → model is well-tuned ✓
+            • If <50% are problematic → adjust sensitivity and re-run
+            • Document common patterns for future reference
+            """)
+        else:
+            st.markdown("### ✅ CLEAN DATASET DETECTED")
+            st.markdown(f"""
+            Great news! No significant anomalies found (0 out of {insights['total_records']:,} records).
+            
+            **This could mean:**
+            • Your data is genuinely clean ✓
+            • Expected rate was too strict - try lowering threshold
+            • Selected features don't capture unusual patterns - try different columns
+            
+            💡 **Next Step:** Try Z-Score method with threshold 2.5 for more sensitive detection.
+            """)
         
-        st.info(f"📊 Showing {len(display_df):,} of {total:,} records")
-    
-    with tab4:
-        st.markdown("### Export Options")
+        st.markdown("---")
+        
+        # Export
+        st.markdown("### 💾 Export Results")
         
         col1, col2, col3 = st.columns(3)
         
@@ -1364,7 +1711,7 @@ else:
             st.download_button(
                 "📥 Download CSV",
                 data=csv_buffer.getvalue(),
-                file_name=f"anomalies_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                file_name=f"anomaly_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
                 use_container_width=True
             )
@@ -1375,65 +1722,29 @@ else:
             st.download_button(
                 "📥 Download Parquet",
                 data=parquet_buffer.getvalue(),
-                file_name=f"anomalies_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet",
+                file_name=f"anomaly_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet",
                 mime="application/octet-stream",
                 use_container_width=True
             )
         
         with col3:
-            excel_buffer = BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                df_results.to_excel(writer, sheet_name='Results', index=False)
-                
-                # Metadata sheet
-                metadata = pd.DataFrame([
-                    ['Analysis Date', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
-                    ['Total Records', total],
-                    ['Anomalies', anomalies],
-                    ['Anomaly Rate', f'{anomaly_rate:.2f}%'],
-                    ['Features Used', ', '.join(numeric_cols)],
-                    ['', ''],
-                    ['Feature Statistics', '']
-                ])
-                
-                if anomalies > 0:
-                    for col in numeric_cols:
-                        if col in df_results.columns:
-                            anom_mean = df_results[df_results['anomaly'] == 1][col].mean()
-                            norm_mean = df_results[df_results['anomaly'] == 0][col].mean()
-                            metadata = pd.concat([metadata, pd.DataFrame([[col, f'Anom: {anom_mean:.2f} | Normal: {norm_mean:.2f}']])], ignore_index=True)
-                
-                metadata.to_excel(writer, sheet_name='Metadata', index=False, header=False)
-            
-            excel_buffer.seek(0)
-            st.download_button(
-                "📥 Download Excel",
-                data=excel_buffer.getvalue(),
-                file_name=f"anomalies_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-        
-        st.markdown("---")
-        
-        # Export statistics
-        st.markdown("### Export Summary")
-        st.info(f"""
-        **Export includes:**
-        - {len(df_results.columns)} columns (original data + anomaly flags + scores)
-        - {anomalies:,} anomaly records flagged
-        - Analysis metadata (Excel only)
-        - Ready for further analysis in Python, R, Excel, or BI tools
-        """)
+            pdf_buffer = generate_pdf_report(insights, categorical_cols, numeric_cols)
+            if pdf_buffer:
+                st.download_button(
+                    "📥 Download PDF",
+                    data=pdf_buffer.getvalue(),
+                    file_name=f"anomaly_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
 
 # Footer
 st.markdown("---")
 st.markdown("""
-<div style='text-align: center; color: #718096; padding: 2rem;'>
+<div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Hunter Pro</b> v2.0 • Enterprise Edition<br>
-        Powered by DuckDB • Apache Arrow • Scikit-learn • Plotly<br>
-        <i>Built for Data Analysts & Data Scientists</i>
+        🎯 <b>Anomaly Detection Pro - FIXED</b> | Developed by CE Innovations Team 2025<br>
+        Powered by DuckDB • PyArrow • Scikit-learn • Plotly | Score-Based Detection ✓
     </p>
 </div>
 """, unsafe_allow_html=True)
