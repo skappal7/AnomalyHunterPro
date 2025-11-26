@@ -846,8 +846,10 @@ def generate_visual_summary(insights: dict, categorical_cols: list, numeric_cols
         # Interpretation
         if ratio > 2:
             st.error(f"⚠️ **Critical:** Anomalies are {ratio:.1f}x higher than normal. This is your #1 investigation priority.")
-        elif ratio < 0.5:
+        elif ratio > 0 and ratio < 0.5:
             st.error(f"⚠️ **Critical:** Anomalies are {(1/ratio):.1f}x lower than normal. Investigate unusual drops.")
+        elif ratio == 0:
+            st.error(f"⚠️ **Critical:** Anomalies have zero average for this metric. Investigate missing/null values.")
         else:
             st.warning(f"⚠️ **Notable:** Anomalies differ by {abs(ratio-1)*100:.0f}% from normal baseline.")
         
@@ -1310,7 +1312,7 @@ with col1:
     st.markdown("""
     <div class="main-header">
         <h1>🎯 Anomaly Detection Pro</h1>
-        <p>Enterprise-Grade Anomaly Detection Platform Version 1.0</p>
+        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1350,7 +1352,7 @@ with st.sidebar:
         • **LOF** - Local neighborhood outliers  
         • **One-Class SVM** - Non-linear boundaries
         
-        **🔧 Improved:** Expected rate is now a guide, not a quota!
+        **🔧 FIXED:** Expected rate is now a guide, not a quota!
         """)
     
     st.markdown("---")
@@ -2031,7 +2033,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Detection Pro</b> | Developed by CE Innovations Team 2025<br>
+        🎯 <b>Anomaly Detection Pro - FIXED</b> | Developed by CE Innovations Team 2025<br>
         Powered by DuckDB • PyArrow • Scikit-learn • Plotly | Score-Based Detection ✓
     </p>
 </div>
