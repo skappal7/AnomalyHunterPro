@@ -1432,7 +1432,7 @@ with col1:
     st.markdown("""
     <div class="main-header">
         <h1>🎯 Anomaly Detection Pro</h1>
-        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
+        <p>Enterprise-Grade Anomaly Detection Platform</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1472,7 +1472,7 @@ with st.sidebar:
         • **LOF** - Local neighborhood outliers  
         • **One-Class SVM** - Non-linear boundaries
         
-        **🔧 FIXED:** Expected rate is now a guide, not a quota!
+        **🔧 NEW:** Expected rate is now a guide, not a quota!
         """)
     
     st.markdown("---")
