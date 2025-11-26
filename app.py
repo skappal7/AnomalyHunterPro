@@ -1312,7 +1312,7 @@ with col1:
     st.markdown("""
     <div class="main-header">
         <h1>🎯 Anomaly Detection Pro</h1>
-        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
+        <p>Enterprise-Grade Anomaly Detection Platform</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1352,7 +1352,7 @@ with st.sidebar:
         • **LOF** - Local neighborhood outliers  
         • **One-Class SVM** - Non-linear boundaries
         
-        **🔧 FIXED:** Expected rate is now a guide, not a quota!
+        **🔧 NEW:** Expected rate is now a guide, not a quota!
         """)
     
     st.markdown("---")
@@ -2033,7 +2033,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #94a3b8; padding: 1.5rem;'>
     <p style='font-size: 14px; font-weight: 300;'>
-        🎯 <b>Anomaly Detection Pro - FIXED</b> | Developed by CE Innovations Team 2025<br>
+        🎯 <b>Anomaly Detection Pro</b> | Developed by CE Innovations Team 2025<br>
         Powered by DuckDB • PyArrow • Scikit-learn • Plotly | Score-Based Detection ✓
     </p>
 </div>
