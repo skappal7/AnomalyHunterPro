@@ -394,6 +394,126 @@ def initialize_duckdb():
         st.session_state.duckdb_con = duckdb.connect(':memory:')
     return st.session_state.duckdb_con
 
+def aggregate_agent_date_data(con, parquet_path: str, agent_col: str, date_col: str) -> tuple[str, int]:
+    """Aggregate transaction-level data to agent-date level
+    
+    Automatically detects numeric columns and applies appropriate aggregation:
+    - Count/Volume metrics (Sales, Orders, Contacts) -> SUM
+    - Rate/Average metrics (AHT, NPS, Conversion) -> AVERAGE
+    - Categorical columns (Department, Location) -> FIRST (keeps one value)
+    
+    Returns: (new_parquet_path, row_count)
+    """
+    try:
+        progress = st.progress(0, text="🔄 Analyzing data structure...")
+        
+        # Get schema
+        schema_query = f"SELECT * FROM parquet_scan('{parquet_path}') LIMIT 0"
+        schema = con.execute(schema_query).description
+        
+        progress.progress(20, text="📊 Identifying metric types...")
+        
+        # Categorize columns
+        numeric_cols = []
+        categorical_cols = []
+        
+        numeric_types = ['INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL', 'INT', 'NUMBER']
+        
+        for col_name, col_type, *_ in schema:
+            col_type_upper = str(col_type).upper()
+            
+            if col_name in [agent_col, date_col]:
+                continue  # Skip grouping columns
+            
+            if any(ntype in col_type_upper for ntype in numeric_types):
+                numeric_cols.append(col_name)
+            else:
+                categorical_cols.append(col_name)
+        
+        progress.progress(40, text="🔢 Building aggregation query...")
+        
+        # Build aggregation expressions
+        agg_expressions = []
+        
+        # Numeric columns - decide SUM vs AVG based on column name patterns
+        for col in numeric_cols:
+            col_lower = col.lower()
+            
+            # SUM for: sales, orders, count, volume, quantity, contacts, calls
+            if any(keyword in col_lower for keyword in ['sales', 'order', 'count', 'volume', 'quantity', 'contact', 'call', 'inbound', 'outbound']):
+                agg_expressions.append(f'SUM("{col}") as "{col}"')
+            # AVG for: time, rate, score, average, percentage, ratio, nps
+            elif any(keyword in col_lower for keyword in ['time', 'rate', 'score', 'avg', 'average', 'pct', 'percent', 'ratio', 'nps', 'aht', 'asa']):
+                agg_expressions.append(f'AVG("{col}") as "{col}"')
+            else:
+                # Default to SUM for unknown numeric columns
+                agg_expressions.append(f'SUM("{col}") as "{col}"')
+        
+        # Categorical columns - take FIRST value (arbitrary but consistent)
+        for col in categorical_cols:
+            agg_expressions.append(f'FIRST("{col}") as "{col}"')
+        
+        progress.progress(60, text="⚙️ Aggregating to agent-date level...")
+        
+        # Build and execute aggregation query
+        agg_query = f"""
+        SELECT 
+            "{agent_col}",
+            "{date_col}",
+            {', '.join(agg_expressions)}
+        FROM parquet_scan('{parquet_path}')
+        GROUP BY "{agent_col}", "{date_col}"
+        ORDER BY "{agent_col}", "{date_col}"
+        """
+        
+        # Create new parquet file
+        aggregated_path = os.path.join(st.session_state.temp_dir, 'aggregated_data.parquet')
+        
+        con.execute(f"""
+            COPY ({agg_query})
+            TO '{aggregated_path}' (FORMAT PARQUET, COMPRESSION SNAPPY)
+        """)
+        
+        progress.progress(80, text="📈 Getting aggregated data info...")
+        
+        # Get row count
+        row_count_query = f"SELECT COUNT(*) FROM parquet_scan('{aggregated_path}')"
+        row_count = con.execute(row_count_query).fetchone()[0]
+        
+        progress.progress(100, text="✅ Aggregation complete!")
+        time.sleep(0.5)
+        progress.empty()
+        
+        return aggregated_path, row_count
+        
+    except Exception as e:
+        st.error(f"❌ Error during aggregation: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+        return None, 0
+
+def detect_agent_date_columns(column_info: dict) -> tuple[str | None, str | None]:
+    """Auto-detect Agent and Date columns from column names"""
+    agent_col = None
+    date_col = None
+    
+    for col_name in column_info.keys():
+        col_lower = col_name.lower()
+        
+        # Detect agent column
+        if agent_col is None and any(keyword in col_lower for keyword in ['agent', 'rep', 'representative', 'employee', 'emp_', 'user']):
+            agent_col = col_name
+        
+        # Detect date column  
+        if date_col is None:
+            col_type = column_info[col_name]['type'].upper()
+            if 'DATE' in col_type or 'TIMESTAMP' in col_type:
+                # Prefer 'Date' or 'date' column over week/month columns
+                if 'date' in col_lower and 'week' not in col_lower and 'month' not in col_lower:
+                    date_col = col_name
+    
+    return agent_col, date_col
+
 def get_column_stats(con, parquet_path: str) -> dict:
     """Get comprehensive column statistics using DuckDB"""
     try:
@@ -1312,7 +1432,7 @@ with col1:
     st.markdown("""
     <div class="main-header">
         <h1>🎯 Anomaly Detection Pro</h1>
-        <p>Enterprise-Grade Anomaly Detection Platform</p>
+        <p>Enterprise-Grade Anomaly Detection Platform - FIXED Version</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1352,7 +1472,7 @@ with st.sidebar:
         • **LOF** - Local neighborhood outliers  
         • **One-Class SVM** - Non-linear boundaries
         
-        **🔧 NEW:** Expected rate is now a guide, not a quota!
+        **🔧 FIXED:** Expected rate is now a guide, not a quota!
         """)
     
     st.markdown("---")
@@ -1443,12 +1563,61 @@ with tab1:
                     con = initialize_duckdb()
                     st.session_state.column_info = get_column_stats(con, parquet_path)
                     
+                    # Auto-detect agent and date columns
+                    detected_agent, detected_date = detect_agent_date_columns(st.session_state.column_info)
+                    
                     st.markdown(f"""
                     <div class="success-box">
                         <h4>✅ File Processed Successfully!</h4>
                         <p><b>Rows:</b> {row_count:,} | <b>Columns:</b> {col_count}</p>
                     </div>
                     """, unsafe_allow_html=True)
+                    
+                    # Show aggregation option if agent-date structure detected
+                    if detected_agent and detected_date:
+                        st.markdown("---")
+                        st.markdown("### 🔄 Data Aggregation (Recommended)")
+                        
+                        st.info(f"""
+                        **Detected:** Agent column = `{detected_agent}`, Date column = `{detected_date}`
+                        
+                        Your data appears to have multiple rows per agent per date. 
+                        Aggregating to agent-date level will improve accuracy and speed.
+                        """)
+                        
+                        col1, col2 = st.columns([3, 1])
+                        
+                        with col1:
+                            aggregate_data = st.checkbox(
+                                "✅ Aggregate to Agent-Date level before analysis",
+                                value=True,
+                                help="Combines multiple rows per agent-day into one row with summed/averaged metrics"
+                            )
+                        
+                        with col2:
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            if st.button("🚀 Apply", type="primary", disabled=not aggregate_data):
+                                with st.spinner("⚙️ Aggregating data..."):
+                                    aggregated_path, agg_row_count = aggregate_agent_date_data(
+                                        con, parquet_path, detected_agent, detected_date
+                                    )
+                                    
+                                    if aggregated_path:
+                                        # Update session state with aggregated data
+                                        st.session_state.parquet_path = aggregated_path
+                                        st.session_state.row_count = agg_row_count
+                                        st.session_state.column_info = get_column_stats(con, aggregated_path)
+                                        
+                                        st.success(f"""
+                                        ✅ **Aggregation Complete!**
+                                        
+                                        - Original: {row_count:,} rows
+                                        - Aggregated: {agg_row_count:,} rows (one per agent-date)
+                                        - Reduction: {(1 - agg_row_count/row_count)*100:.1f}%
+                                        
+                                        Ready for analysis!
+                                        """)
+                                        st.rerun()
         else:
             st.error("❌ Unsupported file format")
     
