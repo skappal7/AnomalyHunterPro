@@ -485,24 +485,30 @@ DETECTION_METHODS = {
     },
 }
 
-def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, method: str = 'zscore', threshold: float = 3) -> pd.DataFrame | None:
-    """SQL-based statistical anomaly detection"""
+def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, method: str = 'zscore', threshold: float = 3) -> tuple[pd.DataFrame | None, dict]:
+    """SQL-based statistical anomaly detection - returns (dataframe, metadata)"""
     try:
         if method == 'zscore':
             select_parts = [f"""
-                ABS(("{col}" - AVG("{col}") OVER ()) / NULLIF(STDDEV("{col}") OVER (), 0)) as zscore_{col}
+                ABS(("{col}" - AVG("{col}") OVER ()) / NULLIF(STDDEV("{col}") OVER (), 0)) as zscore_{col.replace(' ', '_')}
             """ for col in numeric_cols]
             
             query = f"""
             SELECT *, 
                 {', '.join(select_parts)},
-                GREATEST({', '.join([f'zscore_{col}' for col in numeric_cols])}) as max_zscore
+                GREATEST({', '.join([f'zscore_{col.replace(" ", "_")}' for col in numeric_cols])}) as max_zscore
             FROM parquet_scan('{parquet_path}')
             """
             
             df = con.execute(query).df()
             df['anomaly'] = (df['max_zscore'] > threshold).astype(int)
             df['anomaly_score'] = df['max_zscore']
+            
+            metadata = {
+                'method': 'zscore',
+                'threshold_value': threshold,
+                'threshold_display': f"{threshold:.1f}σ (standard deviations)"
+            }
             
         else:  # IQR method
             percentiles = {}
@@ -537,11 +543,17 @@ def detect_anomalies_statistical(con, parquet_path: str, numeric_cols: list, met
                 scores.append(score)
             
             df['anomaly_score'] = np.max(scores, axis=0)
+            
+            metadata = {
+                'method': 'iqr',
+                'threshold_value': 1.5,
+                'threshold_display': "1.5×IQR range"
+            }
         
-        return df
+        return df, metadata
     except Exception as e:
         st.error(f"Error in statistical detection: {e}")
-        return None
+        return None, {}
 
 def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, contamination: float = 0.1) -> tuple[pd.DataFrame | None, dict]:
     """ML-based anomaly detection using score-based thresholding instead of hard contamination constraint
@@ -629,9 +641,11 @@ def detect_anomalies_ml(df: pd.DataFrame, numeric_cols: list, method: str, conta
         actual_count = df_clean['anomaly'].sum()
         
         return df_clean, {
+            'method': 'ml',
             'expected_anomalies': expected_count,
             'actual_anomalies': actual_count,
-            'threshold_used': adaptive_threshold
+            'threshold_value': adaptive_threshold,
+            'threshold_display': f"{adaptive_threshold:.2f} (0-10 scale)"
         }
     except Exception as e:
         st.error(f"Error in ML detection: {e}")
@@ -662,7 +676,9 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         if 'detection_metadata' in st.session_state:
             metadata = st.session_state.detection_metadata
             insights['expected_anomalies'] = metadata.get('expected_anomalies', None)
-            insights['threshold_used'] = metadata.get('threshold_used', None)
+            insights['threshold_value'] = metadata.get('threshold_value', None)
+            insights['threshold_display'] = metadata.get('threshold_display', None)
+            insights['detection_method_type'] = metadata.get('method', None)
         
         # Category-level analysis
         if categorical_cols:
@@ -705,71 +721,98 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         st.error(f"Error generating insights: {e}")
         return {}
 
-def generate_narrative(insights: dict, categorical_cols: list, numeric_cols: list, expected_rate: float = None) -> str:
-    """Generate rich narrative summary of results"""
+def generate_visual_summary(insights: dict, categorical_cols: list, numeric_cols: list, expected_rate: float = None):
+    """Generate professional visual summary with Streamlit native components"""
     total = insights['total_records']
     anomalies = insights['anomalies']
     rate = insights['anomaly_rate']
     method = insights['method']
     
-    # Executive summary
-    narrative = f"""
-    ### 📊 ANALYSIS SUMMARY
+    # === EXECUTIVE VERDICT ===
+    st.markdown("### 🎯 EXECUTIVE SUMMARY")
     
-    Your dataset contains **{total:,} records** analyzed using **{method}**.
-    
-    #### 🎯 THE VERDICT
-    """
-    
-    # Show expected vs actual if available
+    # Verdict box with color coding
     if expected_rate and anomalies > 0:
         expected_pct = expected_rate * 100
         expected_count = insights.get('expected_anomalies', int(total * expected_rate))
-        diff = rate - expected_pct
+        diff = anomalies - expected_count
+        diff_pct = (diff / expected_count * 100) if expected_count > 0 else 0
         
-        narrative += f"""
-    **Expected:** ~{expected_count:,} anomalies ({expected_pct:.1f}%)  
-    **Found:** {anomalies:,} anomalies ({rate:.2f}%)
-    """
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Expected", f"{expected_count:,}", f"{expected_pct:.1f}%")
+        with col2:
+            st.metric("Found", f"{anomalies:,}", f"{rate:.2f}%")
+        with col3:
+            st.metric("Difference", f"{diff:+,}", f"{diff_pct:+.1f}%", delta_color="inverse")
         
-        if abs(diff) < 1:
-            verdict = f"✓ **Right on target** - The data matches your expectations. The algorithm found genuine anomalies at the anticipated rate."
-        elif diff > 2:
-            verdict = f"⚠️ **More than expected** - Found {anomalies - expected_count:,} additional anomalies ({diff:+.1f}%). Your data has more unusual patterns than anticipated - investigate these carefully."
+        # Verdict message
+        if abs(diff_pct) < 10:
+            st.success(f"✅ **On Target** - Detection aligns with expectations. Found {anomalies:,} anomalies within {abs(diff_pct):.1f}% of target.")
+        elif diff > 0:
+            st.error(f"🚨 **High Alert** - Found {abs(diff):,} MORE anomalies than expected ({diff_pct:+.1f}%). Investigate immediately.")
         else:
-            verdict = f"✓ **Cleaner than expected** - Found {expected_count - anomalies:,} fewer anomalies ({diff:.1f}%). Your data quality is better than anticipated."
+            st.info(f"✓ **Cleaner Than Expected** - Found {abs(diff):,} fewer anomalies. Data quality is better than anticipated.")
     else:
+        # Simple verdict for non-ML methods
         if rate < 1:
-            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - a very clean dataset!"
+            st.success(f"✅ **Excellent** - Only {anomalies:,} anomalies ({rate:.2f}%). Very clean dataset.")
         elif rate < 5:
-            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - typical for quality data."
+            st.info(f"✓ **Good** - {anomalies:,} anomalies ({rate:.2f}%). Typical for quality data.")
         elif rate < 10:
-            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - moderate anomaly presence."
+            st.warning(f"⚠️ **Moderate** - {anomalies:,} anomalies ({rate:.2f}%). Review patterns carefully.")
         else:
-            verdict = f"We flagged **{anomalies:,} records ({rate:.2f}%)** as anomalies - significant anomaly presence, investigate patterns."
+            st.error(f"🚨 **High** - {anomalies:,} anomalies ({rate:.2f}%). Significant issues detected.")
     
-    narrative += f"\n{verdict}\n"
+    # Threshold display
+    if 'threshold_display' in insights and insights['threshold_display']:
+        st.caption(f"Detection threshold: **{insights['threshold_display']}**")
     
-    # Threshold info if available
-    if 'threshold_used' in insights:
-        threshold = insights['threshold_used']
-        narrative += f"\n**Detection threshold:** {threshold:.2f} (on 0-10 scale)\n"
+    st.markdown("---")
     
-    # Top finding - feature importance
-    if 'feature_importance' in insights and insights['feature_importance']:
+    # === TOP FINDING - FEATURE ===
+    if 'feature_importance' in insights and insights['feature_importance'] and anomalies > 0:
         top_feature = max(insights['feature_importance'].items(), key=lambda x: x[1]['difference'])
         feature_name = top_feature[0]
         stats = top_feature[1]
         ratio = stats['anomaly_mean'] / stats['normal_mean'] if stats['normal_mean'] != 0 else 0
         
-        narrative += f"""
-    #### 🔥 TOP FINDING
-    **'{feature_name}'** is your biggest red flag - anomalies average **{stats['anomaly_mean']:,.2f}** while normal 
-    records are around **{stats['normal_mean']:,.2f}**. That's a **{ratio:.1f}x difference**.
-    """
+        st.markdown("### 🔥 PRIMARY RED FLAG")
+        
+        # Create visual alert box
+        st.markdown(f"""
+        <div style='background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%); 
+                    padding: 1.5rem; border-radius: 12px; color: white; margin-bottom: 1rem;
+                    box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3);'>
+            <h3 style='margin: 0; color: white; font-size: 1.25rem;'>📊 {feature_name}</h3>
+            <p style='margin: 0.5rem 0 0 0; font-size: 1rem; opacity: 0.95;'>
+                This metric shows the strongest deviation between normal and anomalous records.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Anomaly Average", f"{stats['anomaly_mean']:,.2f}", delta=None)
+        with col2:
+            st.metric("Normal Average", f"{stats['normal_mean']:,.2f}", delta=None)
+        with col3:
+            st.metric("Multiplier", f"{ratio:.1f}x", delta=None, delta_color="off")
+        
+        # Interpretation
+        if ratio > 2:
+            st.error(f"⚠️ **Critical:** Anomalies are {ratio:.1f}x higher than normal. This is your #1 investigation priority.")
+        elif ratio < 0.5:
+            st.error(f"⚠️ **Critical:** Anomalies are {(1/ratio):.1f}x lower than normal. Investigate unusual drops.")
+        else:
+            st.warning(f"⚠️ **Notable:** Anomalies differ by {abs(ratio-1)*100:.0f}% from normal baseline.")
+        
+        st.markdown("---")
     
-    # Where to look - categorical insights
-    if 'categorical_insights' in insights and insights['categorical_insights']:
+    # === WHERE TO LOOK - CATEGORY ===
+    if 'categorical_insights' in insights and insights['categorical_insights'] and anomalies > 0:
+        hotspot_found = False
+        
         for cat_col, cat_data in insights['categorical_insights'].items():
             if cat_data['highest_rate']:
                 highest = cat_data['highest_rate']
@@ -777,15 +820,76 @@ def generate_narrative(insights: dict, categorical_cols: list, numeric_cols: lis
                 cat_rate = highest.get('anomaly_rate', 0)
                 cat_count = highest.get('anomaly_count', 0)
                 
-                if cat_rate > rate * 2:  # Significantly higher than average
-                    narrative += f"""
-    #### ⚠️ WHERE TO LOOK
-    **'{cat_col}' = '{cat_name}'** shows **{cat_rate:.1f}%** anomaly rate (vs {rate:.2f}% overall) with **{cat_count:,} flagged records**. 
-    Start your investigation here.
-    """
-                    break
+                # Only show if significantly higher than average
+                if cat_rate > rate * 1.5:  # 50% higher than average
+                    if not hotspot_found:
+                        st.markdown("### 🎯 INVESTIGATION HOTSPOT")
+                        hotspot_found = True
+                    
+                    # Create hotspot card
+                    severity_color = "#dc2626" if cat_rate > rate * 3 else "#f59e0b"
+                    
+                    st.markdown(f"""
+                    <div style='background: white; border-left: 6px solid {severity_color}; 
+                                padding: 1.5rem; border-radius: 8px; margin-bottom: 1rem;
+                                box-shadow: 0 2px 8px rgba(0,0,0,0.1);'>
+                        <h4 style='margin: 0 0 0.5rem 0; color: #1e293b; font-size: 1.1rem;'>
+                            🔍 {cat_col}
+                        </h4>
+                        <p style='margin: 0; font-size: 1.5rem; font-weight: 700; color: {severity_color};'>
+                            {cat_name}
+                        </p>
+                        <p style='margin: 0.75rem 0 0 0; color: #64748b; font-size: 0.9rem;'>
+                            <b>{cat_count:,} anomalies</b> ({cat_rate:.1f}% rate) vs {rate:.2f}% overall
+                        </p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    ratio_to_avg = cat_rate / rate if rate > 0 else 0
+                    
+                    if ratio_to_avg > 5:
+                        st.error(f"🚨 **CRITICAL HOTSPOT:** This category has {ratio_to_avg:.1f}x the average anomaly rate. Start here immediately.")
+                    elif ratio_to_avg > 3:
+                        st.warning(f"⚠️ **High Priority:** {ratio_to_avg:.1f}x average rate. Prioritize for investigation.")
+                    else:
+                        st.info(f"📍 **Above Average:** {ratio_to_avg:.1f}x average rate. Review carefully.")
+                    
+                    break  # Only show top hotspot
+        
+        if hotspot_found:
+            st.markdown("---")
     
-    return narrative
+    # === QUICK ACTION ITEMS ===
+    if anomalies > 0:
+        st.markdown("### ⚡ IMMEDIATE ACTIONS")
+        
+        high_score_threshold = insights.get('threshold_value', 7.0)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            <div style='background: #eff6ff; border: 2px solid #3b82f6; padding: 1rem; border-radius: 8px;'>
+                <h4 style='margin: 0 0 0.5rem 0; color: #1e40af;'>🎯 Priority 1</h4>
+                <ul style='margin: 0; padding-left: 1.5rem; color: #1e293b;'>
+                    <li>Export flagged records (CSV button below)</li>
+                    <li>Focus on top 5% highest scores first</li>
+                    <li>Assign to audit team within 24hrs</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown("""
+            <div style='background: #fef3c7; border: 2px solid #f59e0b; padding: 1rem; border-radius: 8px;'>
+                <h4 style='margin: 0 0 0.5rem 0; color: #92400e;'>📋 Priority 2</h4>
+                <ul style='margin: 0; padding-left: 1.5rem; color: #1e293b;'>
+                    <li>Review patterns in top finding</li>
+                    <li>Cross-check hotspot categories</li>
+                    <li>Document common themes</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
 
 def create_metric_card(label: str, value: str | int) -> str:
     """Generate HTML for metric card"""
@@ -1034,9 +1138,13 @@ def generate_pdf_report(insights: dict, categorical_cols: list, numeric_cols: li
         elements.append(Paragraph(f"<b>Anomalies Detected:</b> {insights['anomalies']:,} ({insights['anomaly_rate']:.2f}%)", styles['Normal']))
         elements.append(Paragraph(f"<b>Detection Method:</b> {insights['method']}", styles['Normal']))
         
-        # Show expected vs actual if available
-        if 'expected_anomalies' in insights:
+        # Show expected vs actual if available (only for ML methods)
+        if 'expected_anomalies' in insights and insights['expected_anomalies'] is not None:
             elements.append(Paragraph(f"<b>Expected Anomalies:</b> {insights['expected_anomalies']:,}", styles['Normal']))
+        
+        # Show threshold if available
+        if 'threshold_display' in insights and insights['threshold_display']:
+            elements.append(Paragraph(f"<b>Detection Threshold:</b> {insights['threshold_display']}", styles['Normal']))
         
         elements.append(Paragraph(f"<b>Analysis Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
         elements.append(Spacer(1, 20))
@@ -1227,7 +1335,6 @@ with tab1:
             st.session_state.column_info = get_column_stats(con, parquet_path)
             
             st.success("✅ Sample data loaded!")
-            st.balloons()
     
     elif uploaded_file:
         file_type = detect_file_type(uploaded_file)
@@ -1252,7 +1359,6 @@ with tab1:
                         <p><b>Rows:</b> {row_count:,} | <b>Columns:</b> {col_count}</p>
                     </div>
                     """, unsafe_allow_html=True)
-                    st.balloons()
         else:
             st.error("❌ Unsupported file format")
     
@@ -1441,8 +1547,8 @@ with tab2:
                             # Store metadata in session state
                             st.session_state.detection_metadata = detection_metadata
                         else:
-                            results_df = detect_anomalies_statistical(con, st.session_state.parquet_path, numeric_cols, detection_method, threshold if detection_method == 'zscore' else 3)
-                            st.session_state.detection_metadata = {}
+                            results_df, detection_metadata = detect_anomalies_statistical(con, st.session_state.parquet_path, numeric_cols, detection_method, threshold if detection_method == 'zscore' else 3)
+                            st.session_state.detection_metadata = detection_metadata
                         
                         if results_df is not None:
                             st.session_state.results_df = results_df
@@ -1466,7 +1572,6 @@ with tab2:
                             display_lottie(lottie_success, height=150, key="success_animation")
                             
                             st.success(f"✅ Complete in {elapsed_time:.2f}s!")
-                            st.balloons()
                             
                             anomaly_count = results_df['anomaly'].sum()
                             anomaly_rate = (anomaly_count / len(results_df) * 100)
@@ -1535,10 +1640,9 @@ with tab3:
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # Executive narrative summary
+        # Executive visual summary with professional styling
         expected_rate = st.session_state.get('contamination_rate', None)
-        narrative = generate_narrative(insights, categorical_cols, numeric_cols, expected_rate)
-        st.markdown(narrative)
+        generate_visual_summary(insights, categorical_cols, numeric_cols, expected_rate)
         
         st.markdown("---")
         
