@@ -2313,7 +2313,7 @@ with tab2:
                 max_value=min(200, st.session_state.row_count // 2),
                 value=min(50, st.session_state.row_count // 10),
                 step=5,
-                help="Select your target audit volume - the tool will identify the highest priority agents"
+                help="Select your target audit volume - the tool will identify the highest priority records"
             )
         
         with col2:
