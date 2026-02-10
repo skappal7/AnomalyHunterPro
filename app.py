@@ -895,7 +895,7 @@ def apply_intelligent_filtering(df: pd.DataFrame, numeric_cols: list, categorica
             )
         
         group_scores.append({
-            group_col: agent,
+            group_col: group,
             'priority_score': priority_score,
             'critical_days': critical_days,
             'avg_probability': avg_probability,
