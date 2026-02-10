@@ -394,7 +394,7 @@ def initialize_duckdb():
         st.session_state.duckdb_con = duckdb.connect(':memory:')
     return st.session_state.duckdb_con
 
-def aggregate_agent_date_data(con, parquet_path: str, agent_col: str, date_col: str) -> tuple[str, int]:
+def aggregate_agent_date_data(con, parquet_path: str, group_col: str, date_col: str) -> tuple[str, int]:
     """Aggregate transaction-level data to agent-date level
     
     Automatically detects numeric columns and applies appropriate aggregation:
@@ -422,7 +422,7 @@ def aggregate_agent_date_data(con, parquet_path: str, agent_col: str, date_col: 
         for col_name, col_type, *_ in schema:
             col_type_upper = str(col_type).upper()
             
-            if col_name in [agent_col, date_col]:
+            if col_name in [group_col, date_col]:
                 continue  # Skip grouping columns
             
             if any(ntype in col_type_upper for ntype in numeric_types):
@@ -458,12 +458,12 @@ def aggregate_agent_date_data(con, parquet_path: str, agent_col: str, date_col: 
         # Build and execute aggregation query
         agg_query = f"""
         SELECT 
-            "{agent_col}",
+            "{group_col}",
             "{date_col}",
             {', '.join(agg_expressions)}
         FROM parquet_scan('{parquet_path}')
-        GROUP BY "{agent_col}", "{date_col}"
-        ORDER BY "{agent_col}", "{date_col}"
+        GROUP BY "{group_col}", "{date_col}"
+        ORDER BY "{group_col}", "{date_col}"
         """
         
         # Create new parquet file
@@ -494,15 +494,15 @@ def aggregate_agent_date_data(con, parquet_path: str, agent_col: str, date_col: 
 
 def detect_agent_date_columns(column_info: dict) -> tuple[str | None, str | None]:
     """Auto-detect Agent and Date columns from column names"""
-    agent_col = None
+    group_col = None
     date_col = None
     
     for col_name in column_info.keys():
         col_lower = col_name.lower()
         
         # Detect agent column
-        if agent_col is None and any(keyword in col_lower for keyword in ['agent', 'rep', 'representative', 'employee', 'emp_', 'user','department','employee','team','category','location','channel','region','type']):
-            agent_col = col_name
+        if group_col is None and any(keyword in col_lower for keyword in ['agent', 'rep', 'representative', 'employee', 'emp_', 'user','department','employee','team','category','location','channel','region','type']):
+            group_col = col_name
         
         # Detect date column  
         if date_col is None:
@@ -512,7 +512,7 @@ def detect_agent_date_columns(column_info: dict) -> tuple[str | None, str | None
                 if 'date' in col_lower and 'week' not in col_lower and 'month' not in col_lower:
                     date_col = col_name
     
-    return agent_col, date_col
+    return group_col, date_col
 
 def get_column_stats(con, parquet_path: str) -> dict:
     """Get comprehensive column statistics using DuckDB"""
@@ -837,41 +837,41 @@ def apply_intelligent_filtering(df: pd.DataFrame, numeric_cols: list, categorica
         return df, {'mode': 'no_anomalies'}
     
     # Detect agent column
-    agent_col = None
+    group_col = None
     for col in df.columns:
         if any(keyword in col.lower() for keyword in ['agent', 'rep', 'employee', 'user']):
-            agent_col = col
+            group_col = col
             break
     
-    if not agent_col:
+    if not group_col:
         # No agent column - simple mode
         df['priority_score'] = df.get('anomaly_score', 0) * df.get('anomaly_probability', 50) / 100
         return df, {'mode': 'simple', 'note': 'No agent column detected'}
     
     # Calculate composite priority score per agent
-    agent_scores = []
+    group_scores = []
     
-    for agent in df[agent_col].unique():
-        agent_data = df[df[agent_col] == agent]
+    for group in df[group_col].unique():
+        group_data = df[df[group_col] == agent]
         
         # Base score: average anomaly probability
-        avg_probability = agent_data['anomaly_probability'].mean() if 'anomaly_probability' in agent_data else 50
+        avg_probability = group_data['anomaly_probability'].mean() if 'anomaly_probability' in group_data else 50
         
         # Frequency bonus: how many critical/high days
-        if 'risk_tier' in agent_data.columns:
-            critical_days = len(agent_data[agent_data['risk_tier'].isin(['CRITICAL', 'HIGH'])])
+        if 'risk_tier' in group_data.columns:
+            critical_days = len(group_data[group_data['risk_tier'].isin(['CRITICAL', 'HIGH'])])
             frequency_score = min(critical_days * 10, 50)  # Cap at 50 points
         else:
-            critical_days = len(agent_data[agent_data['anomaly'] == 1])
+            critical_days = len(group_data[group_data['anomaly'] == 1])
             frequency_score = min(critical_days * 10, 50)
         
         # Severity bonus: max anomaly score
-        max_score = agent_data['anomaly_score'].max() if 'anomaly_score' in agent_data else 0
+        max_score = group_data['anomaly_score'].max() if 'anomaly_score' in group_data else 0
         severity_score = (max_score / 10) * 30  # Scale to 30 points max
         
         # Multi-metric bonus: count of anomalous metrics
-        if 'anomalous_metric_count' in agent_data.columns:
-            metric_count = agent_data['anomalous_metric_count'].max()
+        if 'anomalous_metric_count' in group_data.columns:
+            metric_count = group_data['anomalous_metric_count'].max()
             multi_metric_score = min(metric_count * 5, 20)  # Cap at 20 points
         else:
             multi_metric_score = 0
@@ -894,8 +894,8 @@ def apply_intelligent_filtering(df: pd.DataFrame, numeric_cols: list, categorica
                 multi_metric_score * 0.10
             )
         
-        agent_scores.append({
-            agent_col: agent,
+        group_scores.append({
+            group_col: agent,
             'priority_score': priority_score,
             'critical_days': critical_days,
             'avg_probability': avg_probability,
@@ -903,30 +903,30 @@ def apply_intelligent_filtering(df: pd.DataFrame, numeric_cols: list, categorica
         })
     
     # Create priority dataframe
-    priority_df = pd.DataFrame(agent_scores)
+    priority_df = pd.DataFrame(group_scores)
     priority_df = priority_df.sort_values('priority_score', ascending=False).reset_index(drop=True)
     
     # Select top N agents
-    top_agents = priority_df.head(target_count)[agent_col].tolist()
+    top_groups = priority_df.head(target_count)[group_col].tolist()
     
     # Add priority scores to original dataframe
-    df = df.merge(priority_df[[agent_col, 'priority_score']], on=agent_col, how='left')
+    df = df.merge(priority_df[[group_col, 'priority_score']], on=group_col, how='left')
     df['priority_score'] = df['priority_score'].fillna(0)
     
     # Mark recommended agents
-    df['recommended_for_audit'] = df[agent_col].isin(top_agents)
+    df['recommended_for_audit'] = df[group_col].isin(top_groups)
     
     # Calculate statistics
-    initial_anomaly_agents = df[df['anomaly'] == 1][agent_col].nunique()
+    initial_anomaly_groups = df[df['anomaly'] == 1][group_col].nunique()
     
     filtering_stats = {
         'mode': 'intelligent',
-        'agent_column': agent_col,
-        'initial_anomaly_agents': initial_anomaly_agents,
+        'group_column': group_col,
+        'initial_anomaly_groups': initial_anomaly_groups,
         'target_count': target_count,
-        'recommended_count': len(top_agents),
+        'recommended_count': len(top_groups),
         'prioritize_consistency': prioritize_consistency,
-        'top_agents': priority_df.head(target_count).to_dict('records')
+        'top_groups': priority_df.head(target_count).to_dict('records')
     }
     
     return df, filtering_stats
@@ -956,13 +956,13 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         return df, {'stages': [], 'total_filtered': 0}
     
     # Detect agent column
-    agent_col = None
+    group_col = None
     for col in df.columns:
         if any(keyword in col.lower() for keyword in ['agent', 'rep', 'employee', 'user']):
-            agent_col = col
+            group_col = col
             break
     
-    if not agent_col:
+    if not group_col:
         # No agent column, apply simple filtering
         if 'anomaly_score' in df.columns:
             # Simple mode: just top percentile
@@ -983,7 +983,7 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
     
     filtering_stats = {
         'stages': [],
-        'agent_column': agent_col,
+        'group_column': group_col,
         'date_column': date_col,
         'config': {
             'frequency_threshold': frequency_threshold,
@@ -995,7 +995,7 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
     # Initial count
     initial_anomalies = df[df['anomaly'] == 1]
     initial_count = len(initial_anomalies)
-    initial_agents = initial_anomalies[agent_col].nunique()
+    initial_agents = initial_anomalies[group_col].nunique()
     
     filtering_stats['initial_anomalies'] = initial_count
     filtering_stats['initial_agents'] = initial_agents
@@ -1006,16 +1006,16 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         critical_df = df[(df['risk_tier'] == 'CRITICAL') | (df['risk_tier'] == 'HIGH')]
         
         if len(critical_df) > 0:
-            agent_frequency = critical_df.groupby(agent_col).size().reset_index(name='critical_day_count')
+            agent_frequency = critical_df.groupby(group_col).size().reset_index(name='critical_day_count')
             
             # Filter: agents with N+ critical days
-            high_freq_agents = agent_frequency[agent_frequency['critical_day_count'] >= frequency_threshold][agent_col].tolist()
+            high_freq_agents = agent_frequency[agent_frequency['critical_day_count'] >= frequency_threshold][group_col].tolist()
             
             # Add frequency count to dataframe
-            df = df.merge(agent_frequency, on=agent_col, how='left')
+            df = df.merge(agent_frequency, on=group_col, how='left')
             df['critical_day_count'] = df['critical_day_count'].fillna(0)
             
-            stage1_count = len(df[(df['anomaly'] == 1) & (df[agent_col].isin(high_freq_agents))])
+            stage1_count = len(df[(df['anomaly'] == 1) & (df[group_col].isin(high_freq_agents))])
             stage1_agents = len(high_freq_agents)
             
             filtering_stats['stages'].append({
@@ -1033,11 +1033,11 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         
         if high_freq_agents is not None:
             # Combine frequency + severity
-            high_priority_mask = high_severity_mask & (df[agent_col].isin(high_freq_agents))
+            high_priority_mask = high_severity_mask & (df[group_col].isin(high_freq_agents))
         else:
             high_priority_mask = high_severity_mask
         
-        high_severity_agents = df[high_priority_mask][agent_col].unique().tolist()
+        high_severity_agents = df[high_priority_mask][group_col].unique().tolist()
         
         stage2_count = high_priority_mask.sum()
         stage2_agents = len(high_severity_agents)
@@ -1065,21 +1065,21 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
                     df[f'{col}_zscore'] = abs((df[col] - col_mean) / col_std)
                     
                     # Count agents with high z-score in this metric
-                    metric_anomalies = df[df[f'{col}_zscore'] > 2].groupby(agent_col).size()
+                    metric_anomalies = df[df[f'{col}_zscore'] > 2].groupby(group_col).size()
                     agent_metric_scores.append(metric_anomalies)
         
         # Count how many metrics each agent is anomalous in
         if agent_metric_scores:
             agent_metric_count = pd.concat(agent_metric_scores, axis=1).fillna(0).sum(axis=1)
             agent_metric_count = agent_metric_count.reset_index()
-            agent_metric_count.columns = [agent_col, 'anomalous_metric_count']
+            agent_metric_count.columns = [group_col, 'anomalous_metric_count']
             
             # Add to dataframe
-            df = df.merge(agent_metric_count, on=agent_col, how='left')
+            df = df.merge(agent_metric_count, on=group_col, how='left')
             df['anomalous_metric_count'] = df['anomalous_metric_count'].fillna(0)
             
             # Filter: agents anomalous in N+ metrics
-            multi_metric_agents = agent_metric_count[agent_metric_count['anomalous_metric_count'] >= multi_metric_threshold][agent_col].tolist()
+            multi_metric_agents = agent_metric_count[agent_metric_count['anomalous_metric_count'] >= multi_metric_threshold][group_col].tolist()
             
             if high_severity_agents is not None:
                 # Combine all filters
@@ -1087,7 +1087,7 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
             else:
                 final_agents = multi_metric_agents
             
-            final_mask = (df['anomaly'] == 1) & (df[agent_col].isin(final_agents))
+            final_mask = (df['anomaly'] == 1) & (df[group_col].isin(final_agents))
             
             stage3_count = final_mask.sum()
             stage3_agents = len(final_agents)
@@ -1100,10 +1100,10 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
             })
         else:
             # No metrics analyzed, use severity agents
-            final_agents = high_severity_agents if high_severity_agents else list(df[df['anomaly'] == 1][agent_col].unique())
+            final_agents = high_severity_agents if high_severity_agents else list(df[df['anomaly'] == 1][group_col].unique())
     else:
         # Not enough metrics for consensus, use severity
-        final_agents = high_severity_agents if high_severity_agents else list(df[df['anomaly'] == 1][agent_col].unique())
+        final_agents = high_severity_agents if high_severity_agents else list(df[df['anomaly'] == 1][group_col].unique())
     
     # === STAGE 4: INTELLIGENT TIERING ===
     # Categorize remaining agents into action tiers
@@ -1113,7 +1113,7 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
                 return 'NORMAL'
             
             # Check if agent passed filtering
-            if row[agent_col] not in final_agents:
+            if row[group_col] not in final_agents:
                 return 'FILTERED_OUT'
             
             metrics = row.get('anomalous_metric_count', 0)
@@ -1137,7 +1137,7 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         # Count agents per tier
         tier_counts = {}
         for tier in ['TIER_1_CRITICAL', 'TIER_2_HIGH', 'TIER_3_MEDIUM', 'TIER_4_LOW']:
-            tier_agents = df[df['audit_tier'] == tier][agent_col].nunique()
+            tier_agents = df[df['audit_tier'] == tier][group_col].nunique()
             tier_counts[tier] = tier_agents
         
         filtering_stats['tier_distribution'] = tier_counts
@@ -1172,26 +1172,26 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         return df, {'stages': [], 'total_filtered': 0}
     
     # Detect agent column
-    agent_col = None
+    group_col = None
     for col in df.columns:
         if any(keyword in col.lower() for keyword in ['agent', 'rep', 'employee', 'user']):
-            agent_col = col
+            group_col = col
             break
     
-    if not agent_col:
+    if not group_col:
         # No agent column, return original
         return df, {'stages': [], 'total_filtered': 0, 'note': 'No agent column detected'}
     
     filtering_stats = {
         'stages': [],
-        'agent_column': agent_col,
+        'group_column': group_col,
         'date_column': date_col
     }
     
     # Initial count
     initial_anomalies = df[df['anomaly'] == 1]
     initial_count = len(initial_anomalies)
-    initial_agents = initial_anomalies[agent_col].nunique()
+    initial_agents = initial_anomalies[group_col].nunique()
     
     filtering_stats['initial_anomalies'] = initial_count
     filtering_stats['initial_agents'] = initial_agents
@@ -1202,17 +1202,17 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         critical_df = df[(df['risk_tier'] == 'CRITICAL') | (df['risk_tier'] == 'HIGH')]
         
         if len(critical_df) > 0:
-            agent_frequency = critical_df.groupby(agent_col).size().reset_index(name='critical_day_count')
+            agent_frequency = critical_df.groupby(group_col).size().reset_index(name='critical_day_count')
             
             # Filter: agents with 3+ critical days (configurable threshold)
             frequency_threshold = 3 if date_col else 1  # Only apply if we have dates
-            high_freq_agents = agent_frequency[agent_frequency['critical_day_count'] >= frequency_threshold][agent_col].tolist()
+            high_freq_agents = agent_frequency[agent_frequency['critical_day_count'] >= frequency_threshold][group_col].tolist()
             
             # Add frequency count to dataframe
-            df = df.merge(agent_frequency, on=agent_col, how='left')
+            df = df.merge(agent_frequency, on=group_col, how='left')
             df['critical_day_count'] = df['critical_day_count'].fillna(0)
             
-            stage1_count = len(df[(df['anomaly'] == 1) & (df[agent_col].isin(high_freq_agents))])
+            stage1_count = len(df[(df['anomaly'] == 1) & (df[group_col].isin(high_freq_agents))])
             stage1_agents = len(high_freq_agents)
             
             filtering_stats['stages'].append({
@@ -1235,7 +1235,7 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
             high_priority_mask = high_severity_mask
         
         stage2_count = high_priority_mask.sum()
-        stage2_agents = df[high_priority_mask][agent_col].nunique()
+        stage2_agents = df[high_priority_mask][group_col].nunique()
         
         filtering_stats['stages'].append({
             'name': 'Severity Filter',
@@ -1260,21 +1260,21 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
                     df[f'{col}_zscore'] = abs((df[col] - col_mean) / col_std)
                     
                     # Count agents with high z-score in this metric
-                    metric_anomalies = df[df[f'{col}_zscore'] > 2].groupby(agent_col).size()
+                    metric_anomalies = df[df[f'{col}_zscore'] > 2].groupby(group_col).size()
                     agent_metric_scores.append(metric_anomalies)
         
         # Count how many metrics each agent is anomalous in
         if agent_metric_scores:
             agent_metric_count = pd.concat(agent_metric_scores, axis=1).fillna(0).sum(axis=1)
             agent_metric_count = agent_metric_count.reset_index()
-            agent_metric_count.columns = [agent_col, 'anomalous_metric_count']
+            agent_metric_count.columns = [group_col, 'anomalous_metric_count']
             
             # Add to dataframe
-            df = df.merge(agent_metric_count, on=agent_col, how='left')
+            df = df.merge(agent_metric_count, on=group_col, how='left')
             df['anomalous_metric_count'] = df['anomalous_metric_count'].fillna(0)
             
             # Filter: agents anomalous in 2+ metrics
-            multi_metric_agents = agent_metric_count[agent_metric_count['anomalous_metric_count'] >= 2][agent_col].tolist()
+            multi_metric_agents = agent_metric_count[agent_metric_count['anomalous_metric_count'] >= 2][group_col].tolist()
             
             if date_col and 'critical_day_count' in df.columns:
                 # Combine all three filters
@@ -1282,18 +1282,18 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
                     (df['anomaly'] == 1) & 
                     (df['anomaly_score'] >= score_threshold) &
                     (df['critical_day_count'] >= frequency_threshold) &
-                    (df[agent_col].isin(multi_metric_agents))
+                    (df[group_col].isin(multi_metric_agents))
                 )
             else:
                 # Just severity + multi-metric
                 final_mask = (
                     (df['anomaly'] == 1) & 
                     (df['anomaly_score'] >= score_threshold) &
-                    (df[agent_col].isin(multi_metric_agents))
+                    (df[group_col].isin(multi_metric_agents))
                 )
             
             stage3_count = final_mask.sum()
-            stage3_agents = df[final_mask][agent_col].nunique()
+            stage3_agents = df[final_mask][group_col].nunique()
             
             filtering_stats['stages'].append({
                 'name': 'Multi-Metric Consensus',
@@ -1330,7 +1330,7 @@ def generate_insights(df: pd.DataFrame, categorical_cols: list, numeric_cols: li
         # Count agents per tier
         tier_counts = {}
         for tier in ['TIER_1_CRITICAL', 'TIER_2_HIGH', 'TIER_3_MEDIUM', 'TIER_4_LOW']:
-            tier_agents = df[df['audit_tier'] == tier][agent_col].nunique()
+            tier_agents = df[df['audit_tier'] == tier][group_col].nunique()
             tier_counts[tier] = tier_agents
         
         filtering_stats['tier_distribution'] = tier_counts
@@ -2469,7 +2469,7 @@ with tab3:
                 st.markdown("### 🎯 AUDIT RECOMMENDATION")
                 
                 recommended = stats['recommended_count']
-                initial = stats['initial_anomaly_agents']
+                initial = stats['initial_anomaly_groups']
                 
                 st.markdown(f"""
                 <div style='background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); 
@@ -2488,12 +2488,12 @@ with tab3:
                 """, unsafe_allow_html=True)
                 
                 # Show top 10 agents preview
-                if 'top_agents' in stats and len(stats['top_agents']) > 0:
+                if 'top_groups' in stats and len(stats['top_groups']) > 0:
                     with st.expander("👀 Preview Top 10 Priority Agents", expanded=True):
-                        top_preview = pd.DataFrame(stats['top_agents'][:10])
+                        top_preview = pd.DataFrame(stats['top_groups'][:10])
                         
                         # Clean up display
-                        display_cols = [col for col in top_preview.columns if col != 'agent_column']
+                        display_cols = [col for col in top_preview.columns if col != 'group_column']
                         if display_cols:
                             # Rename for clarity
                             top_preview_display = top_preview[display_cols].copy()
