@@ -852,7 +852,7 @@ def apply_intelligent_filtering(df: pd.DataFrame, numeric_cols: list, categorica
     group_scores = []
     
     for group in df[group_col].unique():
-        group_data = df[df[group_col] == agent]
+        group_data = df[df[group_col] == group]
         
         # Base score: average anomaly probability
         avg_probability = group_data['anomaly_probability'].mean() if 'anomaly_probability' in group_data else 50
