@@ -501,7 +501,7 @@ def detect_agent_date_columns(column_info: dict) -> tuple[str | None, str | None
         col_lower = col_name.lower()
         
         # Detect agent column
-        if agent_col is None and any(keyword in col_lower for keyword in ['agent', 'rep', 'representative', 'employee', 'emp_', 'user']):
+        if agent_col is None and any(keyword in col_lower for keyword in ['agent', 'rep', 'representative', 'employee', 'emp_', 'user','department','employee','team','category','location','channel','region','type']):
             agent_col = col_name
         
         # Detect date column  
@@ -2308,7 +2308,7 @@ with tab2:
         
         with col1:
             target_audit_count = st.slider(
-                "How many agents should I audit?",
+                "How many records/groups to prioritize for review?",
                 min_value=10,
                 max_value=min(200, st.session_state.row_count // 2),
                 value=min(50, st.session_state.row_count // 10),
@@ -2479,7 +2479,7 @@ with tab3:
                         Out of {initial:,} agents with anomalies detected...
                     </div>
                     <div style='font-size: 2.5rem; font-weight: 700; margin: 1rem 0;'>
-                        Focus on these {recommended:,} agents
+                        Focus on these {recommended:,} records
                     </div>
                     <div style='font-size: 1rem; opacity: 0.95;'>
                         {'✓ Prioritized by consistent patterns across multiple days' if stats.get('prioritize_consistency') else '✓ Ranked by severity and anomaly scores'}
